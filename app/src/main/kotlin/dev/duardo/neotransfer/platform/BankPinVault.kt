@@ -18,10 +18,12 @@ import javax.crypto.spec.GCMParameterSpec
  * AES-GCM under a Keystore key that needs strong biometrics and dies when a new fingerprint is enrolled. Ciphers must
  * be authorized with `BiometricPrompt.CryptoObject` before [encrypt] / [decrypt].
  *
- * The key needs the fingerprint on every use. Some Keystores (Unisoc T612, realme Note 60) reject that use right after
- * a valid fingerprint (`KEY_USER_NOT_AUTHENTICATED`): on the first such rejection the vault moves for good to a key
- * that the fingerprint unlocks for [TIMED_SECONDS]. The prompt then authorizes a cipher of a separate per-use gate
- * key, so it is still the strong fingerprint with a cipher, and [encrypt] / [decrypt] use the timed key right after.
+ * The key needs the fingerprint on every use. Some devices (realme Note 60: Unisoc T612, Silead sensor) bind
+ * fingerprint keys to an authenticator id that their own fingerprint tokens never carry, so the key is rejected right
+ * after a valid fingerprint (`KEY_USER_NOT_AUTHENTICATED`). On the first such rejection the vault moves for good to a
+ * key that any strong fingerprint or the screen lock opens for [TIMED_SECONDS]: the token's user id matches it. The
+ * prompt still offers only the fingerprint and authorizes a cipher of a separate per-use gate key; [encrypt] /
+ * [decrypt] use the timed key right after. A new fingerprint no longer kills that key.
  */
 class BankPinVault(context: Context) : KeyVault {
     private val preferences = context.getSharedPreferences("key_vault", Context.MODE_PRIVATE)
@@ -99,7 +101,10 @@ class BankPinVault(context: Context) : KeyVault {
         gateCipher()
     }
 
-    /** The key at [alias], made on first use: [seconds] after the fingerprint, or 0 for every use. */
+    /**
+     * The key at [alias], made on first use: for every use with the fingerprint (`seconds = 0`), or for [seconds] after
+     * the fingerprint or the screen lock.
+     */
     private fun key(alias: String, seconds: Int): SecretKey {
         if (!keyStore.containsAlias(alias)) KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
             init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
@@ -107,8 +112,10 @@ class BankPinVault(context: Context) : KeyVault {
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
                 .setUserAuthenticationRequired(true)
-                .setUserAuthenticationParameters(seconds, KeyProperties.AUTH_BIOMETRIC_STRONG)
-                .setInvalidatedByBiometricEnrollment(true)
+                .setUserAuthenticationParameters(seconds,
+                    if (seconds == 0) KeyProperties.AUTH_BIOMETRIC_STRONG
+                    else KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
+                .setInvalidatedByBiometricEnrollment(seconds == 0)
                 .build())
             generateKey()
         }
