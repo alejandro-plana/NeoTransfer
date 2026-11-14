@@ -92,7 +92,8 @@ class FakeBank(private val context: Context) : PhoneLine, UssdModem, SmsInbox {
         if (request is BankRequest) {
             answer(request)?.let { body -> scope.launch { delay(2_500); deliver(body) } }
         } else {
-            Toast.makeText(context, "Menú de paquetes (simulado)", Toast.LENGTH_SHORT).show()
+            // dial() runs on the engine's worker thread; a toast needs the main looper.
+            context.mainExecutor.execute { Toast.makeText(context, "Menú de paquetes (simulado)", Toast.LENGTH_SHORT).show() }
         }
         return null
     }

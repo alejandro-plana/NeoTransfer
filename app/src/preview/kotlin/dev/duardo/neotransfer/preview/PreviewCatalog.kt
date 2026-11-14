@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +20,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import dev.duardo.neotransfer.designsystem.R as Ds
+import dev.duardo.neotransfer.designsystem.format.NoBreak
 import dev.duardo.neotransfer.designsystem.format.formatPhone
 import dev.duardo.neotransfer.app.registrationFields
 import dev.duardo.neotransfer.preview.PreviewData.bandec
@@ -33,6 +36,9 @@ import dev.duardo.neotransfer.ui.contacts.ContactDetailScreen
 import dev.duardo.neotransfer.ui.contacts.ContactEditScreen
 import dev.duardo.neotransfer.ui.contacts.ContactsScreen
 import dev.duardo.neotransfer.ui.home.HomeScreen
+import dev.duardo.neotransfer.ui.common.LocalPromptIcon
+import dev.duardo.neotransfer.ui.lock.CodeScreen
+import dev.duardo.neotransfer.ui.lock.CodeSheet
 import dev.duardo.neotransfer.ui.lock.LockScreen
 import dev.duardo.neotransfer.ui.model.ActivityContent
 import dev.duardo.neotransfer.ui.model.BANK_CARD_ONLY
@@ -52,6 +58,8 @@ import dev.duardo.neotransfer.ui.model.CardFieldUi
 import dev.duardo.neotransfer.ui.model.CardFormUi
 import dev.duardo.neotransfer.ui.model.CardSetupUi
 import dev.duardo.neotransfer.ui.model.ClassicSetupUi
+import dev.duardo.neotransfer.ui.model.CodeSettingsUi
+import dev.duardo.neotransfer.ui.model.CodeUi
 import dev.duardo.neotransfer.ui.model.ContactEditUi
 import dev.duardo.neotransfer.ui.model.ContactsContent
 import dev.duardo.neotransfer.ui.model.ContactsUi
@@ -60,6 +68,7 @@ import dev.duardo.neotransfer.ui.model.CubacelResultUi
 import dev.duardo.neotransfer.ui.model.CubacelUi
 import dev.duardo.neotransfer.ui.model.DuplicateUi
 import dev.duardo.neotransfer.ui.model.EditablePhoneUi
+import dev.duardo.neotransfer.ui.model.ForgotCodeUi
 import dev.duardo.neotransfer.ui.model.FieldInput
 import dev.duardo.neotransfer.ui.model.FieldUi
 import dev.duardo.neotransfer.ui.model.ForeignCardUi
@@ -109,6 +118,7 @@ import dev.duardo.neotransfer.ui.services.ServiceFormScreen
 import dev.duardo.neotransfer.ui.services.ServicesScreen
 import dev.duardo.neotransfer.ui.settings.AboutScreen
 import dev.duardo.neotransfer.ui.settings.BackupScreen
+import dev.duardo.neotransfer.ui.settings.CodeSettingsScreen
 import dev.duardo.neotransfer.ui.settings.SettingsScreen
 import dev.duardo.neotransfer.ui.settings.TransfermovilImportScreen
 import dev.duardo.neotransfer.ui.shell.MainShell
@@ -125,6 +135,28 @@ object PreviewCatalog {
         // Access ----------------------------------------------------------------------------------------------
         "lock" to { LockScreen(LockUi.Prompting, noop()) },
         "lock-cancelled" to { LockScreen(LockUi.Cancelled, noop()) },
+        "lock-code" to { LockScreen(LockUi.Code(CodeUi("Escribe el código", 2), fingerprint = true), noop()) },
+        "lock-code-only" to { LockScreen(LockUi.Code(CodeUi("Escribe el código", 0), fingerprint = false), noop()) },
+        "lock-code-wrong" to { LockScreen(LockUi.Code(CodeUi("Escribe el código", 0, error = "Código incorrecto"), fingerprint = true), noop()) },
+        "lock-code-wait" to {
+            LockScreen(
+                LockUi.Code(
+                    CodeUi("Escribe el código", 0, "Demasiados intentos. Prueba en 3${NoBreak}min${NoBreak}52${NoBreak}s", "Te quedan 2 intentos antes de borrar las claves", waiting = true),
+                    fingerprint = true,
+                ),
+                noop(),
+            )
+        },
+        "lock-code-erased" to {
+            LockScreen(LockUi.Code(CodeUi("Escribe el código", 0, "Demasiados intentos. Prueba en 16${NoBreak}min", "Se borraron las claves guardadas", waiting = true), false), noop())
+        },
+        "lock-code-forgot" to { LockScreen(LockUi.Code(CodeUi("Escribe el código", 0), true, forgot = ForgotCodeUi(fingerprint = true)), noop()) },
+        "lock-code-forgot-keys" to {
+            LockScreen(LockUi.Code(CodeUi("Escribe el código", 0), true, forgot = ForgotCodeUi(fingerprint = true, erasesKeys = true)), noop())
+        },
+        "lock-code-forgot-erase" to { LockScreen(LockUi.Code(CodeUi("Escribe el código", 0), false, forgot = ForgotCodeUi(fingerprint = false)), noop()) },
+        "lock-screen-lock" to { CompositionLocalProvider(LocalPromptIcon provides Ds.drawable.ic_lock) { LockScreen(LockUi.Cancelled, noop()) } },
+        "lock-code-create" to { LockScreen(LockUi.Code(CodeUi("Crea un código de 6 dígitos", 3), false, creating = true), noop()) },
         "onboarding-permissions" to { PermissionsScreen(PermissionsUi(emptyList()), noop()) },
         "onboarding-permissions-denied" to { PermissionsScreen(PermissionsUi(listOf(PermissionKind.Sms, PermissionKind.Camera)), noop()) },
         "onboarding-bank" to { BankChoiceScreen(BankChoiceUi(emptySet()), noop()) },
@@ -461,6 +493,22 @@ object PreviewCatalog {
         "transfer-amount" to { TransferAmountScreen(TransferAmountUi(PreviewData.juanRecipient, "300", "CUP", wallet, 0, false, true), noop()) },
         "transfer-amount-over" to { TransferAmountScreen(TransferAmountUi(PreviewData.juanRecipient, "4500.5", "CUP", wallet, 1, true, true), noop()) },
         "transfer-review" to { TransferReviewScreen(TransferReviewUi(PreviewData.juanRecipient, cup("300.00"), bpa, saveContact = null), noop()) },
+        "transfer-review-screen-lock" to {
+            CompositionLocalProvider(LocalPromptIcon provides Ds.drawable.ic_lock) {
+                TransferReviewScreen(TransferReviewUi(PreviewData.juanRecipient, cup("300.00"), bpa, saveContact = null), noop())
+            }
+        },
+        "transfer-review-code" to {
+            CompositionLocalProvider(LocalPromptIcon provides Ds.drawable.ic_lock) {
+                TransferReviewScreen(TransferReviewUi(PreviewData.juanRecipient, cup("300.00"), bpa, saveContact = null), noop())
+                CodeSheet("Transferir 300.00 CUP", CodeUi("Escribe el código", 3), {}, {}, subtitle = "A Juan Carlos Pérez")
+            }
+        },
+        "transfer-review-no-lock" to {
+            CompositionLocalProvider(LocalPromptIcon provides null) {
+                TransferReviewScreen(TransferReviewUi(PreviewData.juanRecipient, cup("300.00"), bpa, saveContact = null), noop())
+            }
+        },
         "transfer-review-new" to {
             TransferReviewScreen(TransferReviewUi(RecipientUi(ForeignCardUi("t", "9204069988012340", Bank.BANDEC, "CUP")), cup("1250.00"), bpa, saveContact = true), noop())
         },
@@ -533,6 +581,17 @@ object PreviewCatalog {
                 ),
                 noop(),
             )
+        },
+        "settings-code" to { CodeSettingsScreen(CodeSettingsUi(protectsKeys = false), noop()) },
+        "settings-code-keys" to { CodeSettingsScreen(CodeSettingsUi(protectsKeys = true), noop()) },
+        "settings-code-screen-lock" to { CodeSettingsScreen(CodeSettingsUi(protectsKeys = false, fingerprint = false), noop()) },
+        "settings-code-create" to { CodeScreen(CodeUi("Crea un código de 6 dígitos", 0), noop()) },
+        "settings-code-repeat" to { CodeScreen(CodeUi("Repite el código", 4), noop()) },
+        "settings-code-mismatch" to { CodeScreen(CodeUi("Crea un código de 6 dígitos", 0, error = "Los códigos no coinciden"), noop()) },
+        "settings-code-current" to { CodeScreen(CodeUi("Escribe el código", 1), noop()) },
+        "settings-code-disable" to {
+            CodeSettingsScreen(CodeSettingsUi(protectsKeys = true), noop())
+            CodeSheet("¿Desactivar el código?", CodeUi("Escribe el código", 0, error = "Código incorrecto"), {}, {})
         },
         "settings-backup-export" to { BackupScreen(BackupUi.Export("contraseña-larga", "contraseña-larg", "Las contraseñas no coinciden", canExport = false), noop()) },
         "settings-backup-import" to { BackupScreen(BackupUi.Import("neotransfer-2026-10-13.ntb", "", null), noop()) },

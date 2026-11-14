@@ -223,8 +223,8 @@ fun BankKeyScreen(state: BankKeyUi, actions: BankKeyActions, modifier: Modifier 
  * same place on every screen that asks for one.
  */
 @Composable
-fun PinKeypad(onKey: (KeypadKey) -> Unit, modifier: Modifier = Modifier) =
-    NeoKeypad(onKey, modifier.padding(horizontal = NeoSpace.gutter), decimal = false)
+fun PinKeypad(onKey: (KeypadKey) -> Unit, modifier: Modifier = Modifier, fingerprint: (() -> Unit)? = null) =
+    NeoKeypad(onKey, modifier.padding(horizontal = NeoSpace.gutter), decimal = false, fingerprint = fingerprint)
 
 // ---- Cards of a bank ----------------------------------------------------------------------------------------
 

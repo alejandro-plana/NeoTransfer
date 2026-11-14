@@ -112,6 +112,24 @@ sealed interface Submission {
  */
 data class KeyToSave(val agency: Agency, val at: Instant, val inHand: Boolean)
 
+/** The app code as the screens need it: whether it is on, and whether the saved keys are under it. */
+data class CodeStatus(val active: Boolean = false, val keysUnderCode: Boolean = false)
+
+/** What typing the app code did ([AppController.enterCode]). */
+sealed interface CodeEntry {
+    /** [keysErased]: the keys under the code could not be opened any more (lost), and were erased. */
+    data class Right(val keysErased: Boolean = false) : CodeEntry
+
+    /**
+     * [failures] wrong in a row; the next try waits [wait] (null: no wait); [left] tries before the saved keys are
+     * erased, when it is time to say so; [erased]: this one erased them.
+     */
+    data class Wrong(val failures: Int, val wait: Duration?, val left: Int?, val erased: Boolean) : CodeEntry
+
+    /** Not checked: the wait of the last wrong code still has [left] to run. */
+    data class Waiting(val left: Duration) : CodeEntry
+}
+
 /** What an import added; what already existed is kept as it was. [cards] counts the Clásicas too. */
 data class ImportSummary(val cards: Int, val contacts: Int, val services: Int)
 
@@ -145,6 +163,7 @@ class AppController(
     private val modem: UssdModem,
     private val inbox: SmsInbox,
     private val vault: KeyVault,
+    private val appCode: AppCode,
     private val notifier: Notifier,
     private val documents: Documents,
     private val phoneBook: PhoneBook,
@@ -177,6 +196,12 @@ class AppController(
     private val keys = mutableMapOf<Agency, CharArray>()
     /** [keys] holds every saved key: the fingerprint decrypted the vault, or there is nothing in it. */
     private var keysLoaded = false
+    /** Keys typed for a send on a phone that cannot save them ([useKey]), and when; each goes once its send is out. */
+    private val typedKeys = mutableMapOf<Agency, Instant>()
+    /** The key of the app code, from the moment the right code is typed until the app locks. */
+    private var codeKey: CodeKey? = null
+    /** The fingerprint opened the code's way back in ([forgotCode]): a new code may be set before unlocking. */
+    private var resettingCode = false
     /** What the person typed for an operation not sent yet ([submit]); never stored. */
     private val typed = mutableMapOf<String, Typed>()
     /** New keys of a key change or of MiTransfer's registration already sent, by operation, until their answer. */
@@ -204,6 +229,8 @@ class AppController(
     private val _loaded = MutableStateFlow(false)
     private val _lastBackup = MutableStateFlow<Instant?>(null)
     private val _peerActivity = MutableStateFlow<List<ActivityRow>?>(null)
+    private val _code = MutableStateFlow(CodeStatus())
+    private val _keysWanted = MutableStateFlow(false)
 
     /** Own bank cards in wallet order, each with its balance. */
     val cards: StateFlow<List<CardView>> = _cards
@@ -235,6 +262,8 @@ class AppController(
      * the app is unlocked again with the fingerprint ([unlockCipher] and [unlock]).
      */
     val keysLocked: StateFlow<Boolean> = _keysLocked
+    /** [keysLocked] while a queued request waits for one of the saved keys: opening them lets it go. */
+    val keysWanted: StateFlow<Boolean> = _keysWanted
     val settings: StateFlow<Settings> = _settings
     /** True until the fingerprint unlocks the app, and again after 1 min in the background. */
     val locked: StateFlow<Boolean> = _locked
@@ -247,6 +276,8 @@ class AppController(
      * or cannot be read, and then nothing of it shows.
      */
     val peerActivity: StateFlow<List<ActivityRow>?> = _peerActivity
+    /** The app code: whether it is on and whether the saved keys are under it. */
+    val code: StateFlow<CodeStatus> = _code
 
     init {
         scope.launch {
@@ -377,58 +408,277 @@ class AppController(
 
     // ---- Unlock and keys ----
 
+    /** What the system prompt allows on this phone, for the keys and for opening the app. */
+    fun phoneLock(): PhoneLock = vault.phoneLock()
+
+    /** The lock of the key that holds the saved keys; null when nothing is saved or they are under the code. */
+    fun savedLock(): PhoneLock? = vault.savedLock()
+
+    /** What the prompt authorizing [cipher], one of the vault's, allows: its key's, fixed when it was handed out. */
+    fun lockOf(cipher: Cipher): PhoneLock = vault.lockOf(cipher)
+
     /**
-     * Cipher for the fingerprint prompt at unlock; null when no key is saved (or a new fingerprint
-     * invalidated them), and then the fingerprint is confirmed without crypto.
+     * Cipher for the prompt at unlock; null when no key is saved under the phone's lock (or a new fingerprint
+     * invalidated them), and then the prompt is confirmed without crypto.
      */
-    suspend fun unlockCipher(): Cipher? = onState {
-        if (!vault.hasKeys()) return@onState null
+    suspend fun unlockCipher(): Cipher? = onState { vaultCipher() }
+
+    private suspend fun vaultCipher(): Cipher? {
+        if (!vault.hasKeys() || vault.underCode()) return null
         val cipher = vault.decryptCipher()
         if (cipher == null) forgetKeys()
-        cipher
+        return cipher
     }
 
     /**
-     * After the fingerprint: [authorized] is the cipher from [unlockCipher] (null when it gave none). Without it while
-     * the vault holds keys, the app unlocks with [keysLocked].
+     * After the prompt: [authorized] is the cipher from [unlockCipher] (null when it gave none). Without it while
+     * the vault holds keys, the app unlocks with [keysLocked]. Unlocked already, it only brings the keys back.
      */
-    suspend fun unlock(authorized: Cipher?) = onState {
-        if (authorized != null) {
-            val plaintext = vault.decrypt(authorized)
-            try {
-                wipeKeys()
-                keys.putAll(BankKeys.decode(plaintext))
-                keysLoaded = true
-            } finally {
-                plaintext.fill(0)
-            }
-        } else {
-            keysLoaded = !vault.hasKeys()
-        }
+    suspend fun unlock(authorized: Cipher?) = onState { open(authorized) }
+
+    private fun open(authorized: Cipher?) {
+        if (authorized != null) load(vault.decrypt(authorized))
+        else if (!vault.hasKeys()) keysLoaded = true
         _locked.value = false
         publish()
     }
 
-    /** Cipher for the fingerprint prompt before [saveKey] or [saveReceivedKey]. */
-    suspend fun keyCipher(): Cipher = onState { vault.encryptCipher() }
+    /** Decrypted keys into memory; [plaintext] is wiped. */
+    private fun load(plaintext: ByteArray) {
+        try {
+            wipeKeys()
+            keys.putAll(BankKeys.decode(plaintext))
+            keysLoaded = true
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    /**
+     * The app code is on: the cipher the fingerprint authorizes to open the app in place of it ([unlockWithFingerprint]),
+     * null when the fingerprint is not offered ([AppCode.fingerprintCipher]). With keys under the phone's fingerprint it
+     * is theirs, so the same prompt brings them back: no finger enrolled after the code exists while the code's key lives.
+     * Without [withKeys], always the code's own key («¿Olvidaste el código?»).
+     */
+    suspend fun fingerprintCipher(withKeys: Boolean = true): Cipher? = onState {
+        codeGate = null
+        val gate = appCode.takeIf { it.active() }?.fingerprintCipher() ?: return@onState null
+        val keys = if (withKeys && vault.phoneLock() == PhoneLock.FINGERPRINT) vaultCipher() else null
+        keys ?: gate.also { codeGate = it }
+    }
+
+    /** The cipher [fingerprintCipher] gave of the code's own fingerprint key, to tell it from the vault's. */
+    private var codeGate: Cipher? = null
+
+    /** After the fingerprint in place of the code: false, still locked, when the Keystore turned it down. */
+    suspend fun unlockWithFingerprint(authorized: Cipher): Boolean = onState {
+        val gate = codeGate.also { codeGate = null }
+        if (authorized === gate) {
+            if (!appCode.fingerprintPassed(authorized)) return@onState false
+            open(null)
+        } else {
+            open(authorized)
+        }
+        appCode.saveAttempts(CodeAttempts())
+        true
+    }
+
+    /**
+     * The app code typed: on the lock screen, or wherever it stands in for the fingerprint. Right, it unlocks the app,
+     * keeps the code's key until the app locks and brings back the keys under it; if they no longer open (a change cut
+     * short, a Keystore that lost their key) they are lost and erased. Wrong, it counts: from the [CODE_WAIT_FROM]th in
+     * a row a wait that doubles, and with the keys under the code the [CODE_ERASE_AT]th (or any later one, should a
+     * process have died in between) erases them. [typed] is wiped.
+     */
+    suspend fun enterCode(typed: CharArray): CodeEntry = onState {
+        try {
+            val attempts = appCode.attempts()
+            attempts.wait?.let { return@onState CodeEntry.Waiting(it) }
+            val key = appCode.check(typed)
+            if (key == null) {
+                val failures = attempts.failures + 1
+                val wait = codeWait(failures)
+                appCode.saveAttempts(CodeAttempts(failures, wait))
+                val underCode = vault.underCode()
+                val erased = underCode && failures >= CODE_ERASE_AT
+                if (erased) forgetKeys()
+                val left = (CODE_ERASE_AT - failures).takeIf { underCode && it in 1..CODE_WARN_LEFT }
+                return@onState CodeEntry.Wrong(failures, wait, left, erased)
+            }
+            appCode.saveAttempts(CodeAttempts())
+            appCode.renewFingerprint()
+            codeKey?.wipe()
+            codeKey = key
+            var lost = false
+            if (vault.underCode() && !keysLoaded) {
+                try {
+                    load(vault.decrypt(key))
+                } catch (_: KeysLost) {
+                    lost = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Anything else may pass: the keys stay, locked ([keysLocked]), and the code opens them later.
+                }
+            }
+            if (lost) forgetKeys()
+            open(null)
+            CodeEntry.Right(keysErased = lost)
+        } finally {
+            typed.fill('\u0000')
+        }
+    }
+
+    /**
+     * Sets the app code: a new one, a change (the current one was typed just before, so the keys under it are in
+     * memory and go under the new one) or, after [forgotCode], one in place of the forgotten code: then the keys
+     * under that one cannot be opened and are erased, and the app unlocks. True when keys were erased.
+     */
+    suspend fun createCode(typed: CharArray): Boolean = onState {
+        try {
+            check(!_locked.value || resettingCode) { "Desbloquea la app primero" }
+            require(typed.size == CODE_LENGTH && typed.all { it in '0'..'9' }) { "El código tiene $CODE_LENGTH dígitos" }
+            val erase = resettingCode && vault.underCode()
+            if (erase) forgetKeys()
+            val moving = !erase && appCode.active() && vault.underCode()
+            if (moving) check(keysLoaded) { KEYS_LOCKED }
+            val prepared = appCode.prepare(typed)
+            val key = prepared.key
+            // The keys are staged under the new code beside the current blob, and become current after the code is set:
+            // cut short before the commit the old code still opens them, after it the new one finds the staged blob.
+            if (moving) BankKeys.encode(keys).let { plaintext -> try { vault.stage(key, plaintext) } finally { plaintext.fill(0) } }
+            appCode.commit(prepared)
+            if (moving) vault.promote()
+            codeKey?.wipe()
+            codeKey = key
+            appCode.saveAttempts(CodeAttempts())
+            if (resettingCode) {
+                resettingCode = false
+                open(null)
+            }
+            publish()
+            erase
+        } finally {
+            typed.fill('\u0000')
+        }
+    }
+
+    /** «¿Olvidaste el código?» › «Entrar con la huella»: the code's fingerprint key passed, and a new code may be set. */
+    suspend fun forgotCode(authorized: Cipher): Boolean = onState {
+        codeGate = null
+        appCode.fingerprintPassed(authorized).also { resettingCode = it }
+    }
+
+    /** Back out of setting a new code after [forgotCode]: the forgotten one stands. */
+    suspend fun keepForgottenCode() = onState { resettingCode = false }
+
+    /**
+     * Turns the code off, right after it was typed. Keys under it go under the phone's lock with [authorized] (a
+     * cipher of [phoneKeyCipher]); without a lock to keep them ([authorized] null) they are erased. True when erased.
+     */
+    suspend fun disableCode(authorized: Cipher?): Boolean = onState {
+        checkNotNull(codeKey) { "Escribe el código" }
+        val moving = vault.underCode()
+        if (moving) check(keysLoaded) { KEYS_LOCKED }
+        val erase = moving && authorized == null
+        // Keys are erased only on a phone with no lock to keep them under.
+        if (erase) check(vault.phoneLock() == PhoneLock.NONE) { NO_LOCK }
+        if (erase) forgetKeys()
+        else if (moving) BankKeys.encode(keys).let { plaintext -> try { vault.encrypt(checkNotNull(authorized), plaintext) } finally { plaintext.fill(0) } }
+        appCode.clear()
+        codeKey?.wipe()
+        codeKey = null
+        publish()
+        erase
+    }
+
+    /**
+     * «Usar también para las claves»: what is saved goes under the code ([on], with the code's key in memory) or under
+     * the phone's lock (with [authorized], a cipher of [phoneKeyCipher]). Either way the keys must be in memory.
+     */
+    suspend fun protectKeys(on: Boolean, authorized: Cipher?) = onState {
+        check(appCode.active()) { "No hay código" }
+        val saved = vault.hasKeys()
+        if (saved) check(keysLoaded) { KEYS_LOCKED }
+        if (saved) BankKeys.encode(keys).let { plaintext ->
+            try {
+                if (on) vault.encrypt(checkNotNull(codeKey) { "Escribe el código" }, plaintext)
+                else vault.encrypt(checkNotNull(authorized) { NO_LOCK }, plaintext)
+            } finally {
+                plaintext.fill(0)
+            }
+        }
+        appCode.setProtectsKeys(on)
+        publish()
+    }
+
+    /** Wrong codes in a row and what is left of the wait they impose. */
+    suspend fun codeAttempts(): CodeAttempts = onState { appCode.attempts() }
+
+    /**
+     * Whether saving goes under the app code: what holds the saved keys says so; with nothing saved, the setting
+     * («Usar también para las claves»). A toggle cut short never sends keys where they are not.
+     */
+    private fun keysUnderCode(): Boolean = if (vault.hasKeys()) vault.underCode() else appCode.active() && appCode.protectsKeys()
+
+    /** The code was typed since the app unlocked: what is under it opens without asking again. */
+    suspend fun codeOpen(): Boolean = onState { codeKey != null }
+
+    /**
+     * Cipher for the prompt before [saveKey] or [saveReceivedKey]; null when the keys are under the app code, which
+     * then must have been typed since the app unlocked ([codeOpen]).
+     * @throws IllegalStateException when the phone has no secure lock to save them under
+     */
+    suspend fun keyCipher(): Cipher? = onState { if (keysUnderCode()) null else phoneCipher() }
+
+    /** Cipher for the prompt that puts the keys under the phone's lock ([disableCode], [protectKeys] off). */
+    suspend fun phoneKeyCipher(): Cipher = onState { phoneCipher() }
+
+    private fun phoneCipher(): Cipher {
+        check(vault.phoneLock() != PhoneLock.NONE) { NO_LOCK }
+        return vault.encryptCipher()
+    }
 
     /**
      * Saves the key of a bank or MiTransfer's PIN, or forgets it with `key = null`. Saving again unblocks a rejected
      * one, and settles a key waiting in [keysToSave] (the person typed it instead).
      */
-    suspend fun saveKey(authorized: Cipher, agency: Agency, key: CharArray?) = onState { storeKey(authorized, agency, key) }
+    suspend fun saveKey(authorized: Cipher?, agency: Agency, key: CharArray?) = onState { storeKey(authorized, agency, key) }
 
     /**
      * Saves the key in [keysToSave] for [agency] without typing it: the new key confirmed in memory, or the key of the
      * registration SMS, read again from the inbox and wiped once encrypted.
      * @throws IllegalStateException when it is not in hand any more: the person types it ([saveKey]).
      */
-    suspend fun saveReceivedKey(authorized: Cipher, agency: Agency) = onState {
+    suspend fun saveReceivedKey(authorized: Cipher?, agency: Agency) = onState {
         check(!_locked.value) { "Desbloquea la app primero" }
         check(keysLoaded) { KEYS_LOCKED }
         val pending = checkNotNull(preferences.pendingKeys[agency]) { "No hay ninguna clave que guardar" }
-        val key = confirmedKeys.remove(agency) ?: pending.sms?.let { readReceivedKey(it) }
+        // A copy: if the save has to go again with a new prompt (VaultMoved), the confirmed key is still there.
+        val key = confirmedKeys[agency]?.copyOf() ?: pending.sms?.let { readReceivedKey(it) }
         storeKey(authorized, agency, checkNotNull(key) { "No se encontró la clave: escríbela" })
+    }
+
+    /**
+     * The key of [agency] typed for a send on a phone with no lock to save it under: the next send that needs it uses
+     * it and it is wiped then, or on locking. Settles a key waiting in [keysToSave], like saving it would.
+     */
+    suspend fun useKey(agency: Agency, key: CharArray) = onState {
+        try {
+            check(!_locked.value) { "Desbloquea la app primero" }
+            require(key.size == agency.pinLength && key.all { it in '0'..'9' }) { keyLength(agency) }
+            keys.remove(agency)?.fill('\u0000')
+            keys[agency] = key.copyOf()
+            typedKeys[agency] = clock()
+            confirmedKeys.remove(agency)?.fill('\u0000')
+            if (agency in preferences.pendingKeys) {
+                preferences = preferences.copy(pendingKeys = preferences.pendingKeys - agency)
+                store.savePreferences(preferences)
+            }
+            publish()
+        } finally {
+            key.fill('\u0000')
+        }
     }
 
     /**
@@ -444,18 +694,34 @@ class AppController(
         publish()
     }
 
-    private suspend fun storeKey(authorized: Cipher, agency: Agency, key: CharArray?) {
+    /** Encrypts the keys, [agency]'s changed, under the code or with [authorized]; memory changes only once saved. */
+    private suspend fun storeKey(authorized: Cipher?, agency: Agency, key: CharArray?) {
         try {
             check(!_locked.value) { "Desbloquea la app primero" }
             // The vault is one blob: written from an incomplete set, it would lose the keys not in memory.
             check(keysLoaded) { KEYS_LOCKED }
-            require(key == null || (key.size == agency.pinLength && key.all { it in '0'..'9' })) {
-                if (agency is Bank) "La clave tiene ${agency.pinLength} dígitos" else "El PIN tiene ${agency.pinLength} dígitos"
+            require(key == null || (key.size == agency.pinLength && key.all { it in '0'..'9' })) { keyLength(agency) }
+            val updated = HashMap(keys).apply {
+                remove(agency)
+                if (key != null) put(agency, key.copyOf())
+            }
+            try {
+                if (updated.isEmpty()) vault.reset()
+                else BankKeys.encode(updated).let { plaintext ->
+                    try {
+                        if (keysUnderCode()) vault.encrypt(checkNotNull(codeKey) { "Escribe el código" }, plaintext)
+                        else vault.encrypt(checkNotNull(authorized) { NO_LOCK }, plaintext)
+                    } finally {
+                        plaintext.fill(0)
+                    }
+                }
+            } catch (e: Exception) {
+                updated[agency]?.fill('\u0000')
+                throw e
             }
             keys.remove(agency)?.fill('\u0000')
-            if (key != null) keys[agency] = key.copyOf()
-            if (keys.isEmpty()) vault.reset()
-            else BankKeys.encode(keys).let { plaintext -> try { vault.encrypt(authorized, plaintext) } finally { plaintext.fill(0) } }
+            updated[agency]?.let { keys[agency] = it }
+            typedKeys.remove(agency)
             confirmedKeys.remove(agency)?.fill('\u0000')
             val savedAt = if (key == null) preferences.keySavedAt - agency else preferences.keySavedAt + (agency to clock())
             preferences = preferences.copy(keySavedAt = savedAt, pendingKeys = preferences.pendingKeys - agency)
@@ -465,6 +731,9 @@ class AppController(
             key?.fill('\u0000')
         }
     }
+
+    private fun keyLength(agency: Agency) =
+        if (agency is Bank) "La clave tiene ${agency.pinLength} dígitos" else "El PIN tiene ${agency.pinLength} dígitos"
 
     /** The key in the registration SMS [id], read again from the inbox; null when the SMS or the key is gone. */
     private suspend fun readReceivedKey(id: Long): CharArray? {
@@ -695,9 +964,9 @@ class AppController(
     /** A request that takes the saved key, or a session opened with it; a disconnect never does. */
     private fun needsKey(request: UssdRequest) = request !is Disconnect && (request.secret == SecretKind.BANK_PIN || request.needsSession)
 
-    /** Saved, not rejected, and not superseded by a newer key still waiting to be saved. */
+    /** Saved (or typed for this send), not rejected, and not superseded by a newer key still waiting to be saved. */
     private fun keyUsable(agency: Agency, current: LedgerView) =
-        agency in preferences.keySavedAt && agency !in current.blocked && agency !in preferences.pendingKeys
+        (agency in preferences.keySavedAt || agency in typedKeys) && agency !in current.blocked && agency !in preferences.pendingKeys
 
     /** Requests whose new key, once confirmed, is the agency's key. */
     private fun setsKey(request: UssdRequest) = request is PinChange || request is MiTransferRegistration || request is BankRegistration
@@ -705,7 +974,8 @@ class AppController(
     /** Evaluates the ledger, publishes it, announces what changed and sends the next request if the SIM is free. */
     private fun publish(fresh: List<SmsRecord> = emptyList()) {
         val previous = view
-        val current = Ledger.evaluate(operationsById.values.toList(), records.values.toList(), wallet.map { it.card }, clock(), preferences.keySavedAt)
+        // A key typed for a send ([useKey]) counts as saved then: it is the one a rejection is held against.
+        val current = Ledger.evaluate(operationsById.values.toList(), records.values.toList(), wallet.map { it.card }, clock(), preferences.keySavedAt + typedKeys)
         view = current
         dropUnconfirmedKeys(current)
         _cards.value = wallet.map { CardView(it, current.balances.getValue(it.card.number)) }
@@ -717,6 +987,11 @@ class AppController(
         _savedKeys.value = preferences.keySavedAt.keys
         _keysToSave.value = preferences.pendingKeys.map { (agency, pending) -> KeyToSave(agency, pending.at, agency in confirmedKeys || pending.sms != null) }
         _keysLocked.value = !_locked.value && !keysLoaded
+        _code.value = CodeStatus(appCode.active(), appCode.active() && keysUnderCode())
+        _keysWanted.value = _keysLocked.value && current.operations.any { status ->
+            val agency = status.operation.request.agency
+            status.state is OperationState.Queued && needsKey(status.operation.request) && agency != null && agency in preferences.keySavedAt
+        }
         _settings.value = preferences.settings
         _lastBackup.value = preferences.lastBackup
         if (previous != null) {
@@ -789,6 +1064,7 @@ class AppController(
             } finally {
                 secret?.fill('\u0000')
             }
+            forgetTypedKey(dispatch.operation)
             // A new key stays in memory, while unlocked, until its answer says whether it is the one to save.
             if (newKey != null) {
                 if (setsKey(request) && !_locked.value) sentKeys[operation.id] = newKey else newKey.fill('\u0000')
@@ -963,9 +1239,29 @@ class AppController(
         return noted
     }
 
+    /**
+     * A key typed for a send ([useKey]) goes once that send's own operation is out, unless another of the same bank
+     * still waits to go with it. An automatic `40` before it is not the send.
+     */
+    private fun forgetTypedKey(operation: Operation) {
+        val agency = operation.request.agency?.takeIf { it in typedKeys } ?: return
+        val current = view ?: return
+        if (current.status(operation.id) == null) return
+        val waiting = current.operations.any {
+            it.operation.id != operation.id && it.operation.request.agency == agency && needsKey(it.operation.request) && it.state is OperationState.Queued
+        }
+        if (waiting) return
+        typedKeys.remove(agency)
+        keys.remove(agency)?.fill('\u0000')
+    }
+
     private fun lock() {
         wipeKeys()
         keysLoaded = false
+        typedKeys.clear()
+        codeKey?.wipe()
+        codeKey = null
+        resettingCode = false
         sentKeys.values.forEach { it.fill('\u0000') }
         sentKeys.clear()
         confirmedKeys.values.forEach { it.fill('\u0000') }
@@ -981,6 +1277,7 @@ class AppController(
 
     private suspend fun forgetKeys() {
         wipeKeys()
+        typedKeys.clear()
         vault.reset()
         preferences = preferences.copy(keySavedAt = emptyMap())
         store.savePreferences(preferences)
@@ -1023,6 +1320,23 @@ class AppController(
         /** Bumped when the inbox gains a sender: the next read starts over, silently ([Preferences.inboxVersion]). */
         private const val INBOX_VERSION = 2
         private const val KEYS_LOCKED = "Vuelve a desbloquear con la huella para guardar la clave"
+        /** No secure screen lock and no app code over the keys: they cannot be saved. */
+        const val NO_LOCK = "Pon un bloqueo de pantalla en el teléfono para guardar la clave"
+
+        const val CODE_LENGTH = 6
+        /** The wrong code in a row from which each one makes the next try wait: 30 s, then double each time, up to 1 hour. */
+        const val CODE_WAIT_FROM = 5
+        private val CODE_FIRST_WAIT: Duration = Duration.ofSeconds(30)
+        private val CODE_LONGEST_WAIT: Duration = Duration.ofHours(1)
+        /** With the keys under the code, this wrong code in a row erases them. */
+        const val CODE_ERASE_AT = 10
+        /** The tries left before the erase are told from this many. */
+        private const val CODE_WARN_LEFT = 2
+
+        /** The wait after [failures] wrong codes in a row; null before [CODE_WAIT_FROM]. */
+        internal fun codeWait(failures: Int): Duration? =
+            if (failures < CODE_WAIT_FROM) null
+            else minOf(CODE_FIRST_WAIT.multipliedBy(1L shl (failures - CODE_WAIT_FROM).coerceAtMost(20)), CODE_LONGEST_WAIT)
 
         /**
          * [text] with every run of digits exactly as long as one of [lengths] masked: an unknown SMS that may carry a new

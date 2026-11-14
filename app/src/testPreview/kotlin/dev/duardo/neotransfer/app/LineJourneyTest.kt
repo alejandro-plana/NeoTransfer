@@ -280,7 +280,7 @@ class LineJourneyTest(private val mode: String) {
     private class FakeHost : Host {
         val prompts = mutableListOf<String>()
         var next: BiometricResult? = null
-        override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?): BiometricResult {
+        override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?, screenLock: Boolean, fallback: Boolean): BiometricResult {
             prompts += title
             return next?.also { next = null } ?: BiometricResult.Passed(cipher)
         }
@@ -296,6 +296,7 @@ class LineJourneyTest(private val mode: String) {
         override fun openContact(key: String) = Unit
         override fun openAppSettings() = Unit
         override fun openNotificationSettings() = Unit
+        override fun eraseAppData() = Unit
     }
 
     companion object {

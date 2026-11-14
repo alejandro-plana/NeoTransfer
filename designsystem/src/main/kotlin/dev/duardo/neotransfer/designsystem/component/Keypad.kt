@@ -55,9 +55,12 @@ sealed interface KeypadKey {
     data object Backspace : KeypadKey
 }
 
-/** On-screen keypad for amounts and PINs. Without [decimal] the bottom-left slot stays empty. */
+/**
+ * On-screen keypad for amounts and PINs. Without [decimal] the bottom-left slot stays empty, or holds the fingerprint
+ * when [fingerprint] is given.
+ */
 @Composable
-fun NeoKeypad(onKey: (KeypadKey) -> Unit, modifier: Modifier = Modifier, decimal: Boolean = true) {
+fun NeoKeypad(onKey: (KeypadKey) -> Unit, modifier: Modifier = Modifier, decimal: Boolean = true, fingerprint: (() -> Unit)? = null) {
     val rows = listOf(listOf(1, 2, 3), listOf(4, 5, 6), listOf(7, 8, 9))
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         rows.forEach { row ->
@@ -66,8 +69,13 @@ fun NeoKeypad(onKey: (KeypadKey) -> Unit, modifier: Modifier = Modifier, decimal
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (decimal) Key(Modifier.weight(1f), DecimalSeparator.toString(), "Separador decimal") { onKey(KeypadKey.Decimal) }
-            else Box(Modifier.weight(1f))
+            when {
+                decimal -> Key(Modifier.weight(1f), DecimalSeparator.toString(), "Separador decimal") { onKey(KeypadKey.Decimal) }
+                fingerprint != null -> KeyFrame(Modifier.weight(1f), "Usar la huella", fingerprint) {
+                    Icon(painterResource(R.drawable.ic_fingerprint), null, tint = MaterialTheme.colorScheme.onSurface)
+                }
+                else -> Box(Modifier.weight(1f))
+            }
             Key(Modifier.weight(1f), "0") { onKey(KeypadKey.Digit(0)) }
             KeyFrame(Modifier.weight(1f), "Borrar", { onKey(KeypadKey.Backspace) }) {
                 Icon(painterResource(R.drawable.ic_backspace), null, tint = MaterialTheme.colorScheme.onSurface)

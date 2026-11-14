@@ -40,7 +40,6 @@ import dev.duardo.neotransfer.designsystem.component.NeoTopBar
 import dev.duardo.neotransfer.designsystem.component.SectionHeader
 import dev.duardo.neotransfer.designsystem.theme.NeoSpace
 import dev.duardo.neotransfer.engine.Submission
-import dev.duardo.neotransfer.platform.BiometricResult
 import dev.duardo.neotransfer.scanner.ScanMode
 import dev.duardo.neotransfer.scanner.ScanResult
 import dev.duardo.neotransfer.ui.model.Appearance
@@ -107,6 +106,7 @@ class SettingsDestination(private val app: AppModel) : Destination(), SettingsAc
                     LocalContext.current.getSystemService(NotificationManager::class.java).areNotificationsEnabled(),
                 lastBackup = domain.lastBackup,
                 version = app.version,
+                code = domain.code.active,
             ),
             this,
         )
@@ -141,6 +141,11 @@ class SettingsDestination(private val app: AppModel) : Destination(), SettingsAc
         }
     }
 
+    override fun code() {
+        if (app.book.value.domain.code.active) app.navigator.push(CodeSettingsDestination(app))
+        else app.navigator.push(CodeDestination(app, change = false) { app.navigator.finish(it, CodeSettingsDestination(app)) })
+    }
+
     override fun backup() = app.navigator.push(BackupDestination(app))
     override fun importTransfermovil() = app.navigator.push(TransfermovilDestination(app))
     override fun about() = app.navigator.push(AboutDestination(app))
@@ -155,7 +160,7 @@ class BankSettingsDestination(private val app: AppModel, internal val bank: Bank
     @Composable
     override fun Content(app: AppModel, book: Book) {
         BankSettingsScreen(
-            BankSettingsUi(bank, book.wallet.filter { it.card.bank == bank }, bank.core() in book.domain.savedKeys),
+            BankSettingsUi(bank, book.wallet.filter { it.card.bank == bank }, bank.core() in book.domain.savedKeys, app.keyProtection()),
             this,
             confirmingRemoval = removing,
             line = book.bankLine(bank),
@@ -215,14 +220,14 @@ class BankSettingsDestination(private val app: AppModel, internal val bank: Bank
     override fun removeBank() { removing = true }
     override fun cancelRemoveBank() { removing = false }
 
-    /** The key leaves the vault only with the fingerprint; then the cards go. Activity stays. */
+    /** The key leaves the vault only with the fingerprint (or what stands in for it); then the cards go. Activity stays. */
     override fun confirmRemoveBank() {
         removing = false
         app.launch {
             if (bank.core() in app.book.value.domain.savedKeys) {
-                val result = app.host?.biometric("Quitar ${bank.shortName}", cipher = app.controller.keyCipher())
-                if (result !is BiometricResult.Passed) return@launch
-                app.controller.saveKey(requireNotNull(result.cipher), bank.core(), null)
+                val sealed = app.seal("Quitar ${bank.shortName}") { app.controller.saveKey(it, bank.core(), null) }
+                if (sealed is Seal.Failed) app.message(sealed.message)
+                if (sealed != Seal.Saved) return@launch
             }
             app.book.value.cards.filter { it.bank == bank }.forEach { app.controller.deleteCard(it.number) }
             app.navigator.remove(this)
@@ -237,7 +242,7 @@ class ClassicSettingsDestination(private val app: AppModel, internal val number:
 
     @Composable
     override fun Content(app: AppModel, book: Book) {
-        val state = book.classicSettings(number) ?: return
+        val state = book.classicSettings(number)?.copy(protection = app.keyProtection()) ?: return
         ClassicSettingsScreen(
             state, this,
             unassociating = removal.ui(),
@@ -274,9 +279,9 @@ class ClassicSettingsDestination(private val app: AppModel, internal val number:
         app.launch {
             val book = app.book.value
             if (MiTransfer in book.domain.savedKeys && lastClassic(book)) {
-                val result = app.host?.biometric("Quitar la Clásica", cipher = app.controller.keyCipher())
-                if (result !is BiometricResult.Passed) return@launch
-                app.controller.saveKey(requireNotNull(result.cipher), MiTransfer, null)
+                val sealed = app.seal("Quitar la Clásica") { app.controller.saveKey(it, MiTransfer, null) }
+                if (sealed is Seal.Failed) app.message(sealed.message)
+                if (sealed != Seal.Saved) return@launch
             }
             app.controller.deleteClassic(number)
             app.navigator.remove(this)

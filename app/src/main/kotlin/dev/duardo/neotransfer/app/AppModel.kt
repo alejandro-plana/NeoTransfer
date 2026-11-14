@@ -35,14 +35,23 @@ import dev.duardo.neotransfer.core.qr.QrContent
 import dev.duardo.neotransfer.data.Settings
 import dev.duardo.neotransfer.data.Theme
 import dev.duardo.neotransfer.data.ClassicCard
+import dev.duardo.neotransfer.designsystem.R as Ds
+import dev.duardo.neotransfer.designsystem.component.KeypadKey
 import dev.duardo.neotransfer.engine.AppController
+import dev.duardo.neotransfer.engine.CodeStatus
 import dev.duardo.neotransfer.engine.KeyToSave
+import dev.duardo.neotransfer.engine.PhoneLock
 import dev.duardo.neotransfer.engine.Routes
 import dev.duardo.neotransfer.engine.Submission
+import dev.duardo.neotransfer.engine.VaultMoved
 import dev.duardo.neotransfer.engine.controller
 import dev.duardo.neotransfer.platform.BiometricResult
+import dev.duardo.neotransfer.ui.lock.LockActions
 import dev.duardo.neotransfer.ui.model.Bank
+import dev.duardo.neotransfer.ui.model.CodeUi
 import dev.duardo.neotransfer.ui.model.DuplicateUi
+import dev.duardo.neotransfer.ui.model.ForgotCodeUi
+import dev.duardo.neotransfer.ui.model.KeyProtection
 import dev.duardo.neotransfer.ui.model.LockUi
 import dev.duardo.neotransfer.ui.model.PermissionKind
 import dev.duardo.neotransfer.ui.model.PermissionsUi
@@ -60,6 +69,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import javax.crypto.Cipher
 
 /**
  * The app's single view model: the controller's state as one [Book], the back stack, the lock and the
@@ -78,7 +88,7 @@ class AppModel @JvmOverloads constructor(
     val book: StateFlow<Book> = combine(
         listOf(controller.loaded, controller.cards, controller.operations, controller.movements, controller.contacts,
             controller.services, controller.savedKeys, controller.blocked, controller.settings, controller.locked, controller.lastBackup,
-            controller.addressBook, controller.classics, controller.keysToSave, controller.keysLocked, controller.peerActivity),
+            controller.addressBook, controller.classics, controller.keysToSave, controller.keysLocked, controller.peerActivity, controller.code),
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         Domain(
@@ -98,6 +108,7 @@ class AppModel @JvmOverloads constructor(
             keysToSave = values[13] as List<KeyToSave>,
             keysLocked = values[14] as Boolean,
             peer = values[15] as List<dev.duardo.neotransfer.core.ledger.ActivityRow>?,
+            code = values[16] as CodeStatus,
         )
     }.map { Book(it) }.flowOn(compute).stateIn(viewModelScope, SharingStarted.Eagerly, Book(Domain()))
 
@@ -118,6 +129,11 @@ class AppModel @JvmOverloads constructor(
     var lock by mutableStateOf<LockUi>(LockUi.Prompting)
         private set
     private var prompting: Job? = null
+    /** The lock screen while the app code is on; null while unlocked. */
+    private var codeLock by mutableStateOf<CodeLock?>(null)
+    /** The app code asked in a sheet ([askCode]). */
+    var codeAsk by mutableStateOf<CodeAsk?>(null)
+        private set
 
     /** Shown instead of the app while permissions are asked or missing; null once settled. */
     var permissions by mutableStateOf<PermissionsUi?>(null)
@@ -134,8 +150,16 @@ class AppModel @JvmOverloads constructor(
         viewModelScope.launch {
             book.collect { book ->
                 val d = book.domain
-                if (d.loaded && d.locked && !d.configured) controller.unlock(null)
+                if (d.loaded && d.locked && !d.guarded) controller.unlock(null)
                 if (d.loaded) syncNightMode(d.settings.theme)
+            }
+        }
+        viewModelScope.launch {
+            controller.locked.collect { locked ->
+                if (!locked) codeLock?.let {
+                    it.dispose()
+                    codeLock = null
+                }
             }
         }
     }
@@ -144,7 +168,7 @@ class AppModel @JvmOverloads constructor(
 
     /** The activity came to the foreground: the fingerprint prompt goes up by itself when the app is locked. */
     fun onStart() {
-        if (domain.loaded && domain.locked && domain.configured) unlock()
+        if (domain.loaded && domain.locked && domain.guarded) unlock()
     }
 
     fun onResume() {
@@ -152,16 +176,25 @@ class AppModel @JvmOverloads constructor(
         if (permissions != null) checkPermissions()
     }
 
-    /** The fingerprint prompt that unlocks the app; with [Domain.keysLocked] it is also what brings the saved keys back. */
+    /**
+     * The prompt that unlocks the app (the fingerprint, or the screen lock where it stands in for it), or with the app
+     * code on the code's lock screen; unlocked with [Domain.keysLocked], what brings the saved keys back ([openKeys]).
+     */
     fun unlock() {
         if (prompting?.isActive == true) return
-        val host = host ?: return
+        if (host == null) return
+        if (!controller.locked.value) {
+            prompting = viewModelScope.launch { openKeys() }
+            return
+        }
+        if (controller.code.value.active) return lockWithCode()
         prompting = viewModelScope.launch {
             lock = LockUi.Prompting
             val cipher = runCatching { controller.unlockCipher() }.getOrNull()
-            when (val result = host.biometric("Desbloquear NeoTransfer", cipher = cipher)) {
+            when (val result = prompt("Desbloquear NeoTransfer", cipher = cipher)) {
                 is BiometricResult.Passed -> runCatching { controller.unlock(result.cipher) }.onFailure { controller.unlock(null) }
-                BiometricResult.Unavailable -> controller.unlock(null)
+                // Only a phone with no lock at all opens without one.
+                BiometricResult.Unavailable -> if (controller.phoneLock() == PhoneLock.NONE) controller.unlock(null) else lock = LockUi.Cancelled
                 BiometricResult.LockedOut -> {
                     for (seconds in LOCKOUT_SECONDS downTo 1) {
                         lock = LockUi.LockedOut(seconds)
@@ -169,9 +202,265 @@ class AppModel @JvmOverloads constructor(
                     }
                     lock = LockUi.Cancelled
                 }
-                BiometricResult.Cancelled, is BiometricResult.Failed -> lock = LockUi.Cancelled
+                BiometricResult.Cancelled, is BiometricResult.Failed, null -> lock = LockUi.Cancelled
             }
         }
+    }
+
+    /** What the lock screen shows now. */
+    fun lockState(): LockUi {
+        val code = codeLock ?: return if (controller.code.value.active) LockUi.Code(CodeUi(ENTER_CODE, 0), fingerprint = false) else lock
+        return LockUi.Code(if (code.creating) code.next.ui() else code.check.ui(), code.fingerprint, code.forgot, code.creating)
+    }
+
+    /** The code's lock screen; the fingerprint goes up by itself when it may stand in for the code. */
+    private fun lockWithCode() {
+        val code = codeLock ?: CodeLock(this).also {
+            codeLock = it
+            it.check.resume()
+        }
+        if (code.creating || code.forgot != null) return
+        prompting = viewModelScope.launch { fingerprintUnlock(code) }
+    }
+
+    /** Never the phone's PIN or pattern here: the fingerprint alone, with its own key or the keys' ([AppController.fingerprintCipher]). */
+    private suspend fun fingerprintUnlock(code: CodeLock) {
+        val cipher = runCatching { controller.fingerprintCipher() }.getOrNull()
+        code.fingerprint = cipher != null
+        if (cipher == null) return
+        when (val result = host?.biometric("Desbloquear NeoTransfer", cipher = cipher, fallback = false)) {
+            is BiometricResult.Passed -> {
+                val passed = runCatching { controller.unlockWithFingerprint(requireNotNull(result.cipher)) }.getOrDefault(false)
+                if (!passed) {
+                    code.fingerprint = false
+                    message("No se pudo verificar la huella")
+                }
+            }
+            BiometricResult.LockedOut -> message("Demasiados intentos con la huella. Prueba en un momento")
+            is BiometricResult.Failed -> message(result.message)
+            BiometricResult.Unavailable -> code.fingerprint = false
+            BiometricResult.Cancelled, null -> Unit
+        }
+    }
+
+    val lockActions = object : LockActions {
+        override fun unlock() = this@AppModel.unlock()
+        override fun key(key: KeypadKey) {
+            val code = codeLock ?: return
+            if (code.creating) code.next.key(key) else code.check.key(key)
+        }
+        override fun fingerprint() {
+            val code = codeLock ?: return
+            if (prompting?.isActive == true) return
+            prompting = viewModelScope.launch { fingerprintUnlock(code) }
+        }
+        override fun forgot() {
+            codeLock?.let { it.forgot = ForgotCodeUi(it.fingerprint, erasesKeys = controller.code.value.keysUnderCode) }
+        }
+        override fun closeForgot() {
+            codeLock?.forgot = null
+        }
+        override fun forgotFingerprint() {
+            val code = codeLock ?: return
+            code.forgot = null
+            launch {
+                val cipher = runCatching { controller.fingerprintCipher(withKeys = false) }.getOrNull() ?: return@launch
+                when (val result = host?.biometric("Desbloquear NeoTransfer", cipher = cipher, fallback = false)) {
+                    is BiometricResult.Passed -> if (runCatching { controller.forgotCode(requireNotNull(result.cipher)) }.getOrDefault(false)) {
+                        code.next.clear()
+                        code.creating = true
+                    } else {
+                        code.fingerprint = false
+                        message("No se pudo verificar la huella")
+                    }
+                    BiometricResult.LockedOut -> message("Demasiados intentos con la huella. Prueba en un momento")
+                    is BiometricResult.Failed -> message(result.message)
+                    else -> Unit
+                }
+            }
+        }
+        override fun eraseData() {
+            codeLock?.let { code -> code.forgot = code.forgot?.copy(erasing = true) }
+        }
+        override fun confirmErase() {
+            host?.eraseAppData()
+        }
+        override fun cancelCreate() {
+            val code = codeLock ?: return
+            code.next.clear()
+            code.creating = false
+            launch { controller.keepForgottenCode() }
+        }
+    }
+
+    /**
+     * The app code in a sheet; true once it is right ([AppController.enterCode] then keeps its key and brings back the
+     * keys under it), false when the sheet is closed.
+     */
+    suspend fun askCode(title: String, subtitle: String? = null): Boolean {
+        codeAsk?.answer?.complete(false)
+        val ask = CodeAsk(this, title, subtitle)
+        codeAsk = ask
+        ask.check.resume()
+        return try {
+            ask.answer.await()
+        } finally {
+            ask.check.dispose()
+            if (codeAsk === ask) codeAsk = null
+        }
+    }
+
+    fun dismissCode() {
+        codeAsk?.answer?.complete(false)
+    }
+
+    /**
+     * The system prompt as this phone takes it: the fingerprint alone, or the fingerprint or the screen lock; for a
+     * [cipher], as its own key takes it.
+     */
+    private suspend fun prompt(title: String, subtitle: String? = null, cipher: Cipher? = null): BiometricResult? {
+        val lock = cipher?.let(controller::lockOf) ?: controller.phoneLock()
+        if (lock == PhoneLock.NONE) return BiometricResult.Unavailable
+        return host?.biometric(title, subtitle, cipher, screenLock = lock == PhoneLock.ANY)
+    }
+
+    /**
+     * Unlocked without the saved keys ([Domain.keysLocked]): the prompt, or the app code when they are under it, brings
+     * them back. True once they are in memory.
+     */
+    suspend fun openKeys(title: String = "Desbloquear NeoTransfer"): Boolean {
+        if (!controller.keysLocked.value) return true
+        if (controller.code.value.keysUnderCode) return askCode(title)
+        val cipher = runCatching { controller.unlockCipher() }.getOrNull()
+        return when (val result = prompt(title, cipher = cipher)) {
+            // Passed without the cipher: the screen lock stood in for unavailable biometrics, and the keys stay shut.
+            is BiometricResult.Passed -> result.cipher != null && runCatching { controller.unlock(result.cipher) }.isSuccess
+            BiometricResult.LockedOut -> false.also { message("Demasiados intentos con la huella. Prueba en un momento") }
+            is BiometricResult.Failed -> false.also { message(result.message) }
+            BiometricResult.Unavailable, BiometricResult.Cancelled, null -> false
+        }
+    }
+
+    /** A request just queued waits for keys this unlock did not open: they are asked for now. */
+    private suspend fun keysForQueued() {
+        if (controller.keysWanted.value) openKeys()
+    }
+
+    /** The icon of what is confirmed before it goes ([dev.duardo.neotransfer.ui.common.LocalPromptIcon]). */
+    fun promptIcon(): Int? = when {
+        controller.code.value.keysUnderCode -> Ds.drawable.ic_lock
+        else -> when (controller.savedLock() ?: controller.phoneLock()) {
+            PhoneLock.FINGERPRINT -> Ds.drawable.ic_fingerprint
+            PhoneLock.ANY -> Ds.drawable.ic_lock
+            PhoneLock.NONE -> null
+        }
+    }
+
+    /** What keeps the saved keys, as Ajustes says it. */
+    fun keyProtection(): KeyProtection = when {
+        controller.code.value.keysUnderCode -> KeyProtection.Code
+        (controller.savedLock() ?: controller.phoneLock()) == PhoneLock.ANY -> KeyProtection.ScreenLock
+        else -> KeyProtection.Fingerprint
+    }
+
+    /** Keys can be saved: under the app code, or under a secure screen lock. */
+    fun canSaveKeys(): Boolean = controller.code.value.keysUnderCode || controller.phoneLock() != PhoneLock.NONE
+
+    /**
+     * Saves with what keeps the keys: the app code when they are under it (asked when not typed since unlocking), or
+     * the prompt authorizing a cipher of the vault, which [save] gets. A phone whose fingerprint key is turned down
+     * moves to the key the screen lock opens too ([VaultMoved]), and the prompt goes up once more.
+     */
+    suspend fun seal(title: String, save: suspend (Cipher?) -> Unit): Seal {
+        if (controller.code.value.keysUnderCode) {
+            if (!controller.codeOpen() && !askCode(title)) return Seal.Cancelled
+            return try {
+                save(null)
+                Seal.Saved
+            } catch (e: Exception) {
+                Seal.Failed(e.message ?: SAVE_FAILED)
+            }
+        }
+        return sealWithPhone(title, { controller.keyCipher() }, save)
+    }
+
+    private suspend fun sealWithPhone(title: String, cipher: suspend () -> Cipher?, save: suspend (Cipher?) -> Unit): Seal {
+        if (controller.phoneLock() == PhoneLock.NONE) return Seal.Failed(AppController.NO_LOCK)
+        repeat(2) {
+            val result = try {
+                prompt(title, cipher = cipher())
+            } catch (e: Exception) {
+                return Seal.Failed(e.message ?: SAVE_FAILED)
+            }
+            when (result) {
+                // Without the cipher (the screen lock stood in for unavailable biometrics) nothing can be sealed.
+                is BiometricResult.Passed -> try {
+                    if (result.cipher == null) return Seal.Failed(SAVE_FAILED)
+                    save(result.cipher)
+                    return Seal.Saved
+                } catch (_: VaultMoved) {
+                    // Saved nothing: the vault moved to the key the screen lock opens too; one more prompt for it.
+                } catch (e: Exception) {
+                    return Seal.Failed(e.message ?: SAVE_FAILED)
+                }
+                BiometricResult.Unavailable -> return Seal.Failed(AppController.NO_LOCK)
+                BiometricResult.LockedOut -> return Seal.LockedOut
+                is BiometricResult.Failed -> return Seal.Failed(result.message)
+                BiometricResult.Cancelled, null -> return Seal.Cancelled
+            }
+        }
+        return Seal.Failed(SAVE_FAILED)
+    }
+
+    /**
+     * «Usar también para las claves»: what is saved goes under the code or back under the phone's lock, opened once
+     * with what keeps it now. Without a screen lock it cannot go back, and stays.
+     */
+    suspend fun protectKeys(on: Boolean) {
+        val title = "Usar también para las claves"
+        try {
+            val saved = controller.savedKeys.value.isNotEmpty()
+            if (saved && !openKeys(title)) return
+            if (on) {
+                if (saved && !controller.codeOpen() && !askCode(title)) return
+                controller.protectKeys(true, null)
+            } else if (!saved) {
+                controller.protectKeys(false, null)
+            } else {
+                failed(sealWithPhone(title, { controller.phoneKeyCipher() }) { controller.protectKeys(false, it) })
+            }
+        } catch (e: IllegalStateException) {
+            message(e.message ?: SAVE_FAILED)
+        }
+    }
+
+    /**
+     * «Desactivar código», confirmed with the code in a sheet. Keys under it go under the phone's lock, with its prompt;
+     * without a screen lock they are erased. True once it is off.
+     */
+    suspend fun disableCode(): Boolean {
+        if (!askCode("¿Desactivar el código?")) return false
+        return try {
+            val moving = controller.code.value.keysUnderCode && controller.savedKeys.value.isNotEmpty()
+            var erased = false
+            if (moving && controller.phoneLock() != PhoneLock.NONE) {
+                val sealed = sealWithPhone("Desactivar código", { controller.phoneKeyCipher() }) { erased = controller.disableCode(it) }
+                if (sealed != Seal.Saved) return false.also { failed(sealed) }
+            } else {
+                erased = controller.disableCode(null)
+            }
+            if (erased) message(KEYS_ERASED)
+            true
+        } catch (e: IllegalStateException) {
+            message(e.message ?: SAVE_FAILED)
+            false
+        }
+    }
+
+    private fun failed(sealed: Seal) = when (sealed) {
+        is Seal.Failed -> message(sealed.message)
+        Seal.LockedOut -> message("Demasiados intentos con la huella. Prueba en un momento")
+        Seal.Saved, Seal.Cancelled -> Unit
     }
 
     /**
@@ -286,12 +575,22 @@ class AppModel @JvmOverloads constructor(
 
     // ---- Sending ----
 
-    /** The fingerprint confirms what was reviewed. Without a fingerprint on the phone there is nothing to ask. */
-    suspend fun authorize(title: String, subtitle: String?): Boolean = when (val result = host?.biometric(title, subtitle)) {
-        is BiometricResult.Passed, BiometricResult.Unavailable -> true
-        BiometricResult.LockedOut -> false.also { message("Demasiados intentos con la huella. Prueba en un momento") }
-        is BiometricResult.Failed -> false.also { message(result.message) }
-        BiometricResult.Cancelled, null -> false
+    /**
+     * The fingerprint (or the screen lock where it stands in for it) confirms what was reviewed; unlocked without the
+     * saved keys, the same prompt brings them back. With the keys under the app code, the code confirms it. Without
+     * any lock there is nothing to ask: the key is typed for the send.
+     */
+    suspend fun authorize(title: String, subtitle: String?): Boolean {
+        if (controller.code.value.keysUnderCode) return askCode(title, subtitle)
+        val cipher = if (controller.keysLocked.value) runCatching { controller.unlockCipher() }.getOrNull() else null
+        return when (val result = prompt(title, subtitle, cipher)) {
+            is BiometricResult.Passed -> true.also { result.cipher?.let { runCatching { controller.unlock(it) } } }
+            // Only a phone with no lock at all sends without one: the key is typed for the send.
+            BiometricResult.Unavailable -> (controller.phoneLock() == PhoneLock.NONE).also { if (!it) message("No se pudo verificar la huella") }
+            BiometricResult.LockedOut -> false.also { message("Demasiados intentos con la huella. Prueba en un momento") }
+            is BiometricResult.Failed -> false.also { message(result.message) }
+            BiometricResult.Cancelled, null -> false
+        }
     }
 
     /**
@@ -321,6 +620,7 @@ class AppModel @JvmOverloads constructor(
             is Submission.Queued -> {
                 show(result.id, live = true, replacing = flow)
                 onQueued()
+                keysForQueued()
             }
             is Submission.ConfirmDuplicate -> return duplicate(result.pending)
             is Submission.KeyRequired -> askKey(result.agency) { viewModelScope.launch { submit(request, flow, confirmed, secret, newKey, onQueued) } }
@@ -336,7 +636,8 @@ class AppModel @JvmOverloads constructor(
         viewModelScope.launch {
             when (val result = runCatching { run() }.getOrElse { message(it.message ?: "No se pudo consultar"); return@launch }) {
                 is Submission.KeyRequired -> askKey(result.agency) { query(run) }
-                else -> Unit
+                is Submission.Queued -> keysForQueued()
+                is Submission.ConfirmDuplicate -> Unit
             }
         }
     }
@@ -414,18 +715,22 @@ class AppModel @JvmOverloads constructor(
         viewModelScope.launch {
             when (val result = runCatching { controller.retry(id) }.getOrElse { message(it.message ?: "No se pudo reintentar"); return@launch }) {
                 is Submission.KeyRequired -> askKey(result.agency) { retry(id) }
-                else -> Unit
+                is Submission.Queued -> keysForQueued()
+                is Submission.ConfirmDuplicate -> Unit
             }
         }
     }
 
-    /** A key that came by itself is saved with the fingerprint alone; any other is typed. Then [then] goes on. */
+    /**
+     * A key that came by itself is saved with the fingerprint alone; any other is typed (on a phone that cannot save it,
+     * for this send). Then [then] goes on.
+     */
     private fun askKey(agency: Agency, then: () -> Unit) {
-        if (domain.keysToSave.any { it.agency == agency && it.inHand }) {
+        if (canSaveKeys() && domain.keysToSave.any { it.agency == agency && it.inHand }) {
             viewModelScope.launch { if (saveReceivedKey(agency.ui())) then() }
             return
         }
-        navigator.push(BankKeyDestination(this, agency.ui(), rejected = agency in domain.blocked) { destination ->
+        navigator.push(BankKeyDestination(this, agency.ui(), rejected = agency in domain.blocked, forSend = true) { destination ->
             navigator.remove(destination)
             then()
         })
@@ -436,15 +741,9 @@ class AppModel @JvmOverloads constructor(
      * [Bank.CLASSIC] is MiTransfer's PIN. False, with a message, when it was not saved: then the person types it.
      */
     suspend fun saveReceivedKey(bank: Bank): Boolean {
-        val cipher = runCatching { controller.keyCipher() }.getOrElse { message(it.message ?: "No se pudo guardar la clave"); return false }
-        return when (val result = host?.biometric(bank.saveKeyTitle, cipher = cipher)) {
-            is BiometricResult.Passed -> runCatching { controller.saveReceivedKey(requireNotNull(result.cipher), bank.agency()) }
-                .onFailure { message(it.message ?: "No se pudo guardar la clave") }.isSuccess
-            BiometricResult.Unavailable -> false.also { message("Configura una huella en el teléfono para guardar la clave") }
-            BiometricResult.LockedOut -> false.also { message("Demasiados intentos con la huella. Prueba en un momento") }
-            is BiometricResult.Failed -> false.also { message(result.message) }
-            BiometricResult.Cancelled, null -> false
-        }
+        val sealed = seal(bank.saveKeyTitle) { controller.saveReceivedKey(it, bank.agency()) }
+        failed(sealed)
+        return sealed == Seal.Saved
     }
 
     /**
@@ -505,6 +804,7 @@ class AppModel @JvmOverloads constructor(
 
     companion object {
         private const val LOCKOUT_SECONDS = 30
+        private const val SAVE_FAILED = "No se pudo guardar la clave"
         private val ESSENTIAL = setOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.CALL_PHONE)
         val ALL_PERMISSIONS = listOf(
             Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.CALL_PHONE,

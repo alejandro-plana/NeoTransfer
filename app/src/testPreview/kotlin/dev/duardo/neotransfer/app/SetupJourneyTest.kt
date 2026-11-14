@@ -194,7 +194,7 @@ class SetupJourneyTest(private val mode: String) {
     private fun field(label: String) = node(hasSetTextAction() and hasText(label))
 
     private class FakeHost : Host {
-        override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?): BiometricResult = BiometricResult.Passed(cipher)
+        override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?, screenLock: Boolean, fallback: Boolean): BiometricResult = BiometricResult.Passed(cipher)
         override suspend fun createDocument(name: String): Uri? = null
         override suspend fun openDocument(): Uri? = null
         override fun displayName(uri: Uri): String? = null
@@ -207,6 +207,7 @@ class SetupJourneyTest(private val mode: String) {
         override fun openContact(key: String) = Unit
         override fun openAppSettings() = Unit
         override fun openNotificationSettings() = Unit
+        override fun eraseAppData() = Unit
     }
 
     companion object {

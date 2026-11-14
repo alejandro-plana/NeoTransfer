@@ -1,5 +1,6 @@
 package dev.duardo.neotransfer
 
+import android.app.ActivityManager
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -75,7 +76,12 @@ class MainActivity : ComponentActivity(), Host {
 
     // ---- Host ----
 
-    override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?): BiometricResult = biometrics.prompt(title, subtitle, cipher)
+    override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?, screenLock: Boolean, fallback: Boolean): BiometricResult =
+        biometrics.prompt(title, subtitle, cipher, screenLock, fallback)
+
+    override fun eraseAppData() {
+        getSystemService(ActivityManager::class.java).clearApplicationUserData()
+    }
 
     @Suppress("UNCHECKED_CAST")
     private suspend fun <T> ask(launch: () -> Unit): T {

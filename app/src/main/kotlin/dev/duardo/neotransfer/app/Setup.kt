@@ -21,7 +21,7 @@ import dev.duardo.neotransfer.data.WalletCard
 import dev.duardo.neotransfer.designsystem.component.KeypadKey
 import dev.duardo.neotransfer.designsystem.format.formatCardNumber
 import dev.duardo.neotransfer.engine.Submission
-import dev.duardo.neotransfer.platform.BiometricResult
+import dev.duardo.neotransfer.engine.AppController
 import dev.duardo.neotransfer.scanner.ScanMode
 import dev.duardo.neotransfer.scanner.ScanResult
 import dev.duardo.neotransfer.ui.model.Bank
@@ -92,14 +92,16 @@ class BankChoiceDestination(private val app: AppModel, private val setup: Boolea
 }
 
 /**
- * The bank key, or MiTransfer's PIN, typed on the app's keypad; the fingerprint seals it in the Keystore. While setting
- * up, [onRegister] leads whoever has no key to registering the line.
+ * The bank key, or MiTransfer's PIN, typed on the app's keypad; the fingerprint (or the screen lock, or the app code)
+ * seals it in the Keystore. While setting up, [onRegister] leads whoever has no key to registering the line. On a phone
+ * that cannot save it, a key asked for a send ([forSend]) or while setting up goes with the next send only.
  */
 class BankKeyDestination(
     private val app: AppModel,
     private val bank: Bank,
     rejected: Boolean = false,
     private val onRegister: ((BankKeyDestination) -> Unit)? = null,
+    private val forSend: Boolean = false,
     private val onSaved: (BankKeyDestination) -> Unit,
 ) : Destination(), BankKeyActions {
     private val length = bank.agency().pinLength
@@ -142,17 +144,15 @@ class BankKeyDestination(
         checking = true
         app.launch {
             try {
-                val cipher = app.controller.keyCipher()
-                when (val result = app.host?.biometric(bank.saveKeyTitle, cipher = cipher)) {
-                    is BiometricResult.Passed -> {
-                        app.controller.saveKey(requireNotNull(result.cipher), bank.agency(), digits.copyOf())
+                if (!app.canSaveKeys()) return@launch useOnce()
+                when (val sealed = app.seal(bank.saveKeyTitle) { app.controller.saveKey(it, bank.agency(), digits.copyOf()) }) {
+                    Seal.Saved -> {
                         clear()
                         onSaved(this)
                     }
-                    BiometricResult.Unavailable -> fail("Configura una huella en el teléfono para guardar la clave")
-                    BiometricResult.LockedOut -> fail("Demasiados intentos con la huella")
-                    is BiometricResult.Failed -> fail(result.message)
-                    BiometricResult.Cancelled, null -> clear()
+                    Seal.LockedOut -> fail("Demasiados intentos con la huella")
+                    is Seal.Failed -> fail(sealed.message)
+                    Seal.Cancelled -> clear()
                 }
             } catch (e: Exception) {
                 fail(e.message ?: "No se pudo guardar la clave")
@@ -160,6 +160,15 @@ class BankKeyDestination(
                 checking = false
             }
         }
+    }
+
+    /** No lock to save it under: for a send, or while setting up (saying so), it goes with the next send; otherwise not at all. */
+    private suspend fun useOnce() {
+        if (!forSend && onRegister == null) return fail(AppController.NO_LOCK)
+        app.controller.useKey(bank.agency(), digits.copyOf())
+        clear()
+        if (!forSend) app.message(AppController.NO_LOCK)
+        onSaved(this)
     }
 
     private fun fail(message: String) {

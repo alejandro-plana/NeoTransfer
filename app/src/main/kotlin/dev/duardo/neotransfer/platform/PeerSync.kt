@@ -6,6 +6,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
+import dev.duardo.neotransfer.BuildConfig
 import dev.duardo.neotransfer.app.Book
 import dev.duardo.neotransfer.app.Domain
 import dev.duardo.neotransfer.core.ledger.ActivityRow
@@ -23,8 +24,8 @@ import kotlinx.coroutines.runBlocking
 /**
  * What NeoTransfer+ reads of this app, at `content://<applicationId>.sync`: `/contacts`, the stored contacts with their
  * tombstones, one [ContactRow] per row; `/activity`, the money operations this app sent ([Book.shared]), one [ActivityRow]
- * per row. Read-only, and only for apps holding `dev.duardo.neotransfer.permission.SYNC_CONTACTS`, a signature permission:
- * only the author's apps get it.
+ * per row. Read-only, and only for apps holding `dev.duardo.neotransfer.permission.SYNC_CONTACTS` (with the variant's
+ * suffix in debug and preview builds), a signature permission: only the author's apps get it.
  */
 class SyncProvider : ContentProvider() {
     override fun onCreate() = true
@@ -96,5 +97,8 @@ internal fun activityRows(cursor: Cursor): List<ActivityRow> {
 
 private const val CONTACTS = "contacts"
 private const val ACTIVITY = "activity"
-private fun peer(path: String): Uri = Uri.parse("content://dev.duardo.neotransfer.plus.sync/$path")
+private fun peer(path: String): Uri = Uri.parse("content://${peerAuthority(BuildConfig.VARIANT_SUFFIX)}/$path")
+
+/** NeoTransfer+'s provider in the variant of [suffix] ("", ".debug", ".preview"): each variant syncs with its own. */
+internal fun peerAuthority(suffix: String) = "dev.duardo.neotransfer.plus$suffix.sync"
 private val CONTACT_COLUMNS = arrayOf("id", "name", "phones", "cards", "updated", "deleted")

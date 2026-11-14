@@ -16,6 +16,7 @@ import dev.duardo.neotransfer.ui.model.ClassicSettingsUi
 import dev.duardo.neotransfer.ui.model.FieldInput
 import dev.duardo.neotransfer.ui.model.FieldShape
 import dev.duardo.neotransfer.ui.model.FieldUi
+import dev.duardo.neotransfer.ui.model.KeyProtection
 import dev.duardo.neotransfer.ui.model.KeyToSaveUi
 import dev.duardo.neotransfer.ui.model.LineAccountUi
 import dev.duardo.neotransfer.ui.model.LineRequestUi
@@ -40,6 +41,9 @@ import java.math.BigDecimal
 internal val settingsLineScreens: Map<String, @Composable () -> Unit> = linkedMapOf(
     // Ajustes › banco ----------------------------------------------------------------------------------------------
     "settings-bank" to { BankSettingsScreen(LineData.bpaSettings, noop(), line = LineData.line(Bank.BPA)) },
+    "settings-bank-code" to {
+        BankSettingsScreen(LineData.bpaSettings.copy(protection = KeyProtection.Code), noop(), line = LineData.line(Bank.BPA))
+    },
     "settings-bank-remove-card" to {
         BankSettingsScreen(LineData.bpaSettings, noop(), line = LineData.line(Bank.BPA), removingCard = LineData.bpaSettings.cards.first().card.id)
     },

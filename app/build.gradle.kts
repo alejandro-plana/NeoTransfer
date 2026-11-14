@@ -12,6 +12,17 @@ plugins {
 val localSigningFile = File(System.getProperty("user.home"), ".neotransfer/signing.properties")
 val localSigning = Properties().apply { if (localSigningFile.isFile) localSigningFile.inputStream().use(::load) }
 
+/**
+ * The build type's suffix of the application id ("", ".debug", ".preview"). The sync permission and the peer's provider
+ * carry it too (manifest placeholder and `BuildConfig.VARIANT_SUFFIX`): each variant syncs with the same variant of
+ * NeoTransfer+ and installs next to the others, whose keys differ. Release names stay as they were.
+ */
+fun com.android.build.api.dsl.ApplicationBuildType.variantSuffix(suffix: String) {
+    applicationIdSuffix = suffix
+    manifestPlaceholders["variantSuffix"] = suffix
+    buildConfigField("String", "VARIANT_SUFFIX", "\"$suffix\"")
+}
+
 android {
     namespace = "dev.duardo.neotransfer"
     compileSdk = 36
@@ -20,14 +31,17 @@ android {
         applicationId = "dev.duardo.neotransfer"
         minSdk = 35
         targetSdk = 36
-        versionCode = 120
-        versionName = "1.2.0"
+        versionCode = 130
+        versionName = "1.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Android 15+ phones are 64-bit ARM; the ML Kit and CameraX natives ship for that ABI only.
         ndk { abiFilters += "arm64-v8a" }
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     signingConfigs {
         if (localSigningFile.isFile) create("localRelease") {
             storeFile = file(requireNotNull(localSigning.getProperty("storeFile")))
@@ -38,9 +52,10 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".debug"
+            variantSuffix(".debug")
         }
         getByName("release") {
+            variantSuffix("")
             isDebuggable = false
             isMinifyEnabled = true
             isShrinkResources = true
@@ -49,7 +64,7 @@ android {
         }
         create("preview") {
             initWith(getByName("debug"))
-            applicationIdSuffix = ".preview"
+            variantSuffix(".preview")
             matchingFallbacks += "debug"
         }
     }

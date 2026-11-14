@@ -374,7 +374,7 @@ class NoticeRoutesTest {
     private fun text(value: String) = node(hasText(value)).also { runCatching { it.performScrollTo() } }
 
     private class FakeHost : Host {
-        override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?): BiometricResult = BiometricResult.Passed(cipher)
+        override suspend fun biometric(title: String, subtitle: String?, cipher: Cipher?, screenLock: Boolean, fallback: Boolean): BiometricResult = BiometricResult.Passed(cipher)
         override suspend fun createDocument(name: String): Uri? = null
         override suspend fun openDocument(): Uri? = null
         override fun displayName(uri: Uri): String? = null
@@ -387,6 +387,7 @@ class NoticeRoutesTest {
         override fun openContact(key: String) = Unit
         override fun openAppSettings() = Unit
         override fun openNotificationSettings() = Unit
+        override fun eraseAppData() = Unit
     }
 
     private companion object {

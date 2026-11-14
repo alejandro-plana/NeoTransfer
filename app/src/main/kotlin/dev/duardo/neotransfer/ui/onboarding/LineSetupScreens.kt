@@ -63,6 +63,7 @@ import dev.duardo.neotransfer.designsystem.component.SecureWindow
 import dev.duardo.neotransfer.designsystem.theme.Neo
 import dev.duardo.neotransfer.designsystem.theme.NeoRadius
 import dev.duardo.neotransfer.designsystem.theme.NeoSpace
+import dev.duardo.neotransfer.ui.common.LocalPromptIcon
 import dev.duardo.neotransfer.ui.common.BankCard
 import dev.duardo.neotransfer.ui.common.CardNumberTransformation
 import dev.duardo.neotransfer.ui.common.ExpiryTransformation
@@ -140,7 +141,7 @@ fun BankRegistrationScreen(
         when {
             !confirmed -> RetryActions(request.state, actions::edit)
             key == null -> NeoButton("Continuar", actions::done)
-            key.inHand -> NeoButton("Guardar la clave", actions::saveKey, icon = Ds.drawable.ic_fingerprint)
+            key.inHand -> NeoButton("Guardar la clave", actions::saveKey, icon = LocalPromptIcon.current)
             else -> NeoButton("Escribir la clave", actions::typeKey)
         }
     }
@@ -153,7 +154,7 @@ private fun registrationShown(state: LineStateUi, key: KeyToSaveUi?, saved: Bool
 @Composable
 private fun RegistrationForm(state: BankRegistrationUi, actions: BankRegistrationActions, sending: Boolean, modifier: Modifier) {
     FormScaffold("Registrar la línea en ${state.bank.shortName}", actions::close, modifier, bottom = {
-        NeoButton("Registrar", actions::send, enabled = state.canSend, loading = sending, icon = Ds.drawable.ic_fingerprint)
+        NeoButton("Registrar", actions::send, enabled = state.canSend, loading = sending, icon = LocalPromptIcon.current)
     }) {
         val fields = state.fields
         var index = 0
@@ -326,7 +327,7 @@ fun ClassicRegisterScreen(
                 request.state is LineStateUi.Answered -> NeoButton("Continuar", actions::done)
                 !confirmed -> RetryActions(request.state, actions::edit)
                 key == null -> NeoButton("Continuar", actions::done)
-                key.inHand -> NeoButton("Guardar el PIN", actions::saveKey, icon = Ds.drawable.ic_fingerprint)
+                key.inHand -> NeoButton("Guardar el PIN", actions::saveKey, icon = LocalPromptIcon.current)
                 else -> NeoButton("Escribir el PIN", actions::typeKey)
             }
         }
@@ -347,7 +348,7 @@ fun ClassicRegisterScreen(
                 actions.pinKey(key)
             }, Modifier.padding(top = NeoSpace.s))
         },
-        bottom = { NeoButton("Registrar", actions::send, enabled = state.canSend, loading = pin.sending, icon = Ds.drawable.ic_fingerprint) },
+        bottom = { NeoButton("Registrar", actions::send, enabled = state.canSend, loading = pin.sending, icon = LocalPromptIcon.current) },
     ) {
         NeoTextField(
             state.identity.value, actions::identity, state.identity.label, Modifier.onFocusChanged { identityFocused = it.isFocused },
@@ -433,7 +434,7 @@ fun ClassicAssociateScreen(state: ClassicSetupUi.Associate, actions: ClassicAsso
         return
     }
     FormScaffold("Asociar la Clásica", actions::close, modifier, bottom = {
-        NeoButton("Asociar", actions::send, enabled = state.canSend, loading = sending, icon = Ds.drawable.ic_fingerprint)
+        NeoButton("Asociar", actions::send, enabled = state.canSend, loading = sending, icon = LocalPromptIcon.current)
     }) {
         ClassicNumberField(state.number, actions::number, last = false, onScan = actions::scan)
         Row(horizontalArrangement = Arrangement.spacedBy(NeoSpace.m)) {

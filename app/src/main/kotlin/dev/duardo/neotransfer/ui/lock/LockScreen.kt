@@ -27,23 +27,37 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import dev.duardo.neotransfer.designsystem.R as Ds
+import dev.duardo.neotransfer.designsystem.component.KeypadKey
 import dev.duardo.neotransfer.designsystem.component.NeoButton
 import dev.duardo.neotransfer.designsystem.component.glow
 import dev.duardo.neotransfer.designsystem.theme.Neo
 import dev.duardo.neotransfer.designsystem.theme.NeoSpace
+import dev.duardo.neotransfer.ui.common.LocalPromptIcon
 import dev.duardo.neotransfer.ui.common.BrandMark
 import dev.duardo.neotransfer.ui.model.LockUi
 
-fun interface LockActions {
+interface LockActions {
     fun unlock()
+    /** The app code ([LockUi.Code]). */
+    fun key(key: KeypadKey)
+    fun fingerprint()
+    fun forgot()
+    fun closeForgot()
+    fun forgotFingerprint()
+    /** «Borrar los datos de la app»: its confirmation, in the same sheet. */
+    fun eraseData()
+    fun confirmErase()
+    /** Back from setting a new code to typing the forgotten one. */
+    fun cancelCreate()
 }
 
 /**
  * What shows behind the system fingerprint prompt: the mark and the locked state, nothing to press.
- * After a cancel, a single action brings the prompt back.
+ * After a cancel, a single action brings the prompt back. With the app code on, the code is typed here.
  */
 @Composable
 fun LockScreen(state: LockUi, actions: LockActions, modifier: Modifier = Modifier) {
+    if (state is LockUi.Code) return CodeLockScreen(state, actions, modifier)
     Box(modifier.fillMaxSize()) {
         BrandBackdrop {
             Spacer(Modifier.weight(0.8f))
@@ -58,8 +72,8 @@ fun LockScreen(state: LockUi, actions: LockActions, modifier: Modifier = Modifie
         ) {
             Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = NeoSpace.gutter, vertical = NeoSpace.l)) {
                 when (state) {
-                    is LockUi.LockedOut -> NeoButton("Desbloquear en ${state.seconds} s", actions::unlock, icon = Ds.drawable.ic_fingerprint, enabled = false)
-                    else -> NeoButton("Desbloquear", actions::unlock, icon = Ds.drawable.ic_fingerprint)
+                    is LockUi.LockedOut -> NeoButton("Desbloquear en ${state.seconds} s", actions::unlock, icon = LocalPromptIcon.current, enabled = false)
+                    else -> NeoButton("Desbloquear", actions::unlock, icon = LocalPromptIcon.current)
                 }
             }
         }

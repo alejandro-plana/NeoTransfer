@@ -45,7 +45,7 @@ La 1.0 envía las operaciones con el mismo formato que Transfermóvil y pruebas 
 
 - Android 15 o más nuevo, de 64 bits.
 - Una línea cubana registrada en Transfermóvil con BPA, BANDEC o Metropolitano. NeoTransfer usa esa misma clave; el registro no lo hace. Si el teléfono tiene dos SIM, usa la predeterminada para llamadas.
-- Una huella configurada en el teléfono.
+- Para guardar la clave del banco: una huella o un bloqueo de pantalla (PIN, patrón o contraseña), o el código de acceso de la app. Sin ninguno, la app pide la clave en cada envío.
 
 ## Instalación
 
@@ -60,16 +60,16 @@ Las versiones nuevas se instalan igual, encima de la anterior, y conservan tus d
 
 1. Al abrir la app, Android te pide todos los permisos de una vez: SMS y Teléfono, que son imprescindibles, y Cámara, Contactos y Notificaciones.
 2. Elige tu banco: BPA, BANDEC o Metropolitano.
-3. Escribe la clave de autenticación del banco, la misma de Transfermóvil (4 dígitos en BPA y Metropolitano, 5 en BANDEC), y confírmala con la huella.
+3. Escribe la clave de autenticación del banco, la misma de Transfermóvil (4 dígitos en BPA y Metropolitano, 5 en BANDEC), y confírmala con la huella (o con el bloqueo de pantalla si el teléfono no tiene huella).
 4. Añade tus tarjetas de ese banco: escribe el número o escanéalo, y elige CUP o USD. El titular y el vencimiento son opcionales.
 5. Toca «Consultar saldo» para ver el saldo por primera vez. La actividad ya aparece con los SMS del banco que tenías.
 
-El otro banco se añade en Ajustes › Bancos y claves. Desde entonces, la app pide la huella al abrirla y al volver después de un minuto fuera.
+El otro banco se añade en Ajustes › Bancos y claves. Desde entonces, la app pide la huella (o el bloqueo de pantalla) al abrirla y al volver después de un minuto fuera. En Ajustes › Código de acceso puedes poner un código de 6 dígitos para abrirla, y usarlo también para las claves.
 
 ## Privacidad
 
 - Sin servidores ni cuentas: NeoTransfer solo habla con tu banco, por USSD y SMS. Tarjetas, contactos y actividad se guardan en el teléfono y no entran en las copias de seguridad de Google.
-- La clave del banco se guarda cifrada y solo se abre con tu huella. No va en los respaldos.
+- La clave del banco se guarda cifrada y solo se abre con tu huella, el bloqueo de pantalla del teléfono o, si lo eliges, el código de acceso. No va en los respaldos.
 - La app lee los SMS del banco para saber resultados y saldos; no los muestra ni los manda a ningún sitio.
 - Sin analítica ni publicidad, y sin permiso de Internet: la app no puede conectarse a nada. El escáner lee los códigos en el propio teléfono.
 - En la pantalla de bloqueo, las notificaciones solo dicen «Transferencia recibida» u «Operación confirmada».

@@ -14,18 +14,37 @@ sealed interface BiometricResult {
     data object Cancelled : BiometricResult
     /** Too many failed attempts: the sensor rests for a while. */
     data object LockedOut : BiometricResult
-    /** No sensor or no fingerprint enrolled. */
+    /** Nothing the prompt allows is set: no fingerprint enrolled (and, when it allows it, no secure screen lock). */
     data object Unavailable : BiometricResult
     data class Failed(val message: String) : BiometricResult
 }
 
-/** The system fingerprint prompt (strong biometrics), with or without a Keystore cipher to authorize. */
+/**
+ * The system prompt, with or without a Keystore cipher to authorize: strong biometrics alone, or with [screenLock] the
+ * screen lock too. Android allows no negative button with the screen lock: the prompt itself offers it.
+ *
+ * Biometrics locked out: [BiometricResult.LockedOut] without a prompt. Strong biometrics otherwise unavailable on a
+ * phone with a screen lock (not enabled for apps, sensor unavailable): with [fallback], the screen lock confirms instead,
+ * without the cipher ([BiometricResult.Passed] carries none).
+ */
 class BiometricGate(private val activity: Activity) {
-    fun available(): Boolean = activity.getSystemService(BiometricManager::class.java)
-        .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
+    private fun authenticators(screenLock: Boolean) =
+        if (screenLock) BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        else BiometricManager.Authenticators.BIOMETRIC_STRONG
 
-    suspend fun prompt(title: String, subtitle: String?, cipher: Cipher?): BiometricResult {
-        if (!available()) return BiometricResult.Unavailable
+    private fun status(screenLock: Boolean): Int = activity.getSystemService(BiometricManager::class.java).canAuthenticate(authenticators(screenLock))
+
+    suspend fun prompt(title: String, subtitle: String?, cipher: Cipher?, screenLock: Boolean, fallback: Boolean): BiometricResult {
+        when (status(screenLock)) {
+            BiometricManager.BIOMETRIC_SUCCESS -> Unit
+            // The same codes the prompt reports; canAuthenticate gives them where the platform reports a lockout there.
+            BiometricPrompt.BIOMETRIC_ERROR_LOCKOUT, BiometricPrompt.BIOMETRIC_ERROR_LOCKOUT_PERMANENT -> return BiometricResult.LockedOut
+            else -> return if (!screenLock && fallback && status(screenLock = true) == BiometricManager.BIOMETRIC_SUCCESS) {
+                prompt(title, subtitle, null, screenLock = true, fallback = false)
+            } else {
+                BiometricResult.Unavailable
+            }
+        }
         return suspendCancellableCoroutine { continuation ->
             val cancellation = CancellationSignal()
             fun finish(result: BiometricResult) {
@@ -34,8 +53,8 @@ class BiometricGate(private val activity: Activity) {
             val prompt = BiometricPrompt.Builder(activity)
                 .setTitle(title)
                 .apply { subtitle?.let(::setSubtitle) }
-                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                .setNegativeButton("Cancelar", activity.mainExecutor) { _, _ -> finish(BiometricResult.Cancelled) }
+                .setAllowedAuthenticators(authenticators(screenLock))
+                .apply { if (!screenLock) setNegativeButton("Cancelar", activity.mainExecutor) { _, _ -> finish(BiometricResult.Cancelled) } }
                 .build()
             val callback = object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
@@ -48,7 +67,7 @@ class BiometricGate(private val activity: Activity) {
                     BiometricPrompt.BIOMETRIC_ERROR_TIMEOUT -> BiometricResult.Cancelled
                     BiometricPrompt.BIOMETRIC_ERROR_LOCKOUT, BiometricPrompt.BIOMETRIC_ERROR_LOCKOUT_PERMANENT -> BiometricResult.LockedOut
                     BiometricPrompt.BIOMETRIC_ERROR_NO_BIOMETRICS, BiometricPrompt.BIOMETRIC_ERROR_HW_NOT_PRESENT,
-                    BiometricPrompt.BIOMETRIC_ERROR_HW_UNAVAILABLE -> BiometricResult.Unavailable
+                    BiometricPrompt.BIOMETRIC_ERROR_HW_UNAVAILABLE, BiometricPrompt.BIOMETRIC_ERROR_NO_DEVICE_CREDENTIAL -> BiometricResult.Unavailable
                     else -> BiometricResult.Failed(message.toString())
                 })
             }

@@ -56,6 +56,7 @@ import dev.duardo.neotransfer.designsystem.format.formatCardNumber
 import dev.duardo.neotransfer.designsystem.format.unbroken
 import dev.duardo.neotransfer.designsystem.theme.Neo
 import dev.duardo.neotransfer.designsystem.theme.NeoSpace
+import dev.duardo.neotransfer.ui.common.LocalPromptIcon
 import dev.duardo.neotransfer.ui.common.AnswerCaption
 import dev.duardo.neotransfer.ui.common.AnswerText
 import dev.duardo.neotransfer.ui.common.BankCardThumb
@@ -427,7 +428,7 @@ fun LineRequestScreen(
     RequestStatusScreen(state, service.icon(bank), state.lineCopy(bank, service, keyToSave, card), bank.party, actions::close, modifier) {
         when {
             keyToSave != null && (state is LineStateUi.Confirmed || state is LineStateUi.Answered) -> {
-                if (keyToSave.inHand) NeoButton("Guardar la clave nueva", actions::saveKey, icon = Ds.drawable.ic_fingerprint)
+                if (keyToSave.inHand) NeoButton("Guardar la clave nueva", actions::saveKey, icon = LocalPromptIcon.current)
                 else NeoButton("Escribir la clave nueva", actions::saveKey)
                 if (state is LineStateUi.Answered) NeoTextButton("Descartar", actions::discardKey, Modifier.fillMaxWidth())
             }

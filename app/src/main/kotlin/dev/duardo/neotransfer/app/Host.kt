@@ -6,7 +6,14 @@ import javax.crypto.Cipher
 
 /** What only the activity can do: system dialogs and other apps. Each call suspends until the person answers. */
 interface Host {
-    suspend fun biometric(title: String, subtitle: String? = null, cipher: Cipher? = null): BiometricResult
+    /**
+     * The system prompt: the fingerprint alone, or with [screenLock] the fingerprint or the screen lock. With [fallback],
+     * when strong biometrics are unavailable on a phone with a screen lock, the screen lock confirms without [cipher].
+     */
+    suspend fun biometric(title: String, subtitle: String? = null, cipher: Cipher? = null, screenLock: Boolean = false, fallback: Boolean = true): BiometricResult
+
+    /** Erases everything the app keeps and closes it (`ActivityManager.clearApplicationUserData`). */
+    fun eraseAppData()
 
     /** System "save as": null when the person backs out. */
     suspend fun createDocument(name: String): Uri?

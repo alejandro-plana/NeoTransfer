@@ -8,10 +8,12 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import dev.duardo.neotransfer.data.LegacyData
 import dev.duardo.neotransfer.data.NeoDatabase
 import dev.duardo.neotransfer.data.RoomStore
+import dev.duardo.neotransfer.platform.AndroidAppCode
 import dev.duardo.neotransfer.platform.AndroidNotifier
 import dev.duardo.neotransfer.platform.AndroidPeerActivity
 import dev.duardo.neotransfer.platform.AndroidPeerContacts
 import dev.duardo.neotransfer.platform.AndroidPhoneBook
+import dev.duardo.neotransfer.platform.AndroidPhoneKeys
 import dev.duardo.neotransfer.platform.AndroidSmsInbox
 import dev.duardo.neotransfer.platform.AndroidUssdModem
 import dev.duardo.neotransfer.platform.BankPinVault
@@ -37,11 +39,14 @@ open class NeoTransferApplication : Application() {
         super.onCreate()
         LegacyData.clearOnFirstStart(this)
         val line = phoneLine()
+        val keys = AndroidPhoneKeys(this)
+        val vault = BankPinVault(this, keys)
         controller = AppController(
             store = RoomStore(NeoDatabase.open(this).dao()),
             modem = line.modem,
             inbox = line.inbox,
-            vault = BankPinVault(this),
+            vault = vault,
+            appCode = AndroidAppCode(this, keys, vault),
             notifier = AndroidNotifier(this),
             documents = ContentDocuments(this),
             phoneBook = AndroidPhoneBook(this),

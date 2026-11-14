@@ -1,138 +1,233 @@
 package dev.duardo.neotransfer.platform
 
 import android.content.Context
-import android.security.KeyStoreException
-import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
-import android.security.keystore.KeyProperties
-import android.security.keystore.UserNotAuthenticatedException
 import android.util.Base64
+import dev.duardo.neotransfer.engine.AppController
+import dev.duardo.neotransfer.engine.CodeKey
 import dev.duardo.neotransfer.engine.KeyVault
-import java.security.KeyStore
+import dev.duardo.neotransfer.engine.KeysLost
+import dev.duardo.neotransfer.engine.PhoneLock
+import dev.duardo.neotransfer.engine.VaultMoved
+import java.util.WeakHashMap
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
- * AES-GCM under a Keystore key that needs strong biometrics and dies when a new fingerprint is enrolled. Ciphers must
- * be authorized with `BiometricPrompt.CryptoObject` before [encrypt] / [decrypt].
- *
- * The key needs the fingerprint on every use. Some devices (realme Note 60: Unisoc T612, Silead sensor) bind
- * fingerprint keys to an authenticator id that their own fingerprint tokens never carry, so the key is rejected right
- * after a valid fingerprint (`KEY_USER_NOT_AUTHENTICATED`). On the first such rejection the vault moves for good to a
- * key that any strong fingerprint or the screen lock opens for [TIMED_SECONDS]: the token's user id matches it. The
- * prompt still offers only the fingerprint and authorizes a cipher of a separate per-use gate key; [encrypt] /
- * [decrypt] use the timed key right after. A new fingerprint no longer kills that key.
+ * AES-256-GCM of the keys' blob under one Keystore key, which the prompt authorizes for every use:
+ * - with a strong fingerprint enrolled, a key for the fingerprint alone that dies when a new one is enrolled;
+ * - with only a secure screen lock, or on a phone whose fingerprint keys never authorize ([anyOnly]), a key the
+ *   fingerprint or the screen lock opens;
+ * - under the app code, the blob of the code's key ([CodeKey]) wrapped by a key that asks nothing and only ties it to
+ *   this phone.
+ * The key that holds the blob keeps holding it until the vault is emptied.
  */
-class BankPinVault(context: Context) : KeyVault {
-    private val preferences = context.getSharedPreferences("key_vault", Context.MODE_PRIVATE)
-    private val device = context.getSharedPreferences("key_vault_device", Context.MODE_PRIVATE)
-    private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    private val timed get() = device.getBoolean("timed", false)
+class BankPinVault internal constructor(context: Context, private val phone: PhoneKeys) : KeyVault {
+    constructor(context: Context) : this(context, AndroidPhoneKeys(context))
 
-    override fun hasKeys(): Boolean = preferences.contains("ciphertext") && preferences.contains("iv")
+    private val preferences = context.getSharedPreferences("key_vault", Context.MODE_PRIVATE)
+    /** What this phone showed once and keeps after [reset]. */
+    private val device = context.getSharedPreferences("key_vault_device", Context.MODE_PRIVATE)
+    /** The key each cipher handed out belongs to: its prompt, the realme check and the save go by it, never recomputed. */
+    private val issued = WeakHashMap<Cipher, String>()
+
+    init {
+        // A test build of PR #3 (never released) kept this flag; its keys go in [reset].
+        if (device.contains(LEGACY_TIMED)) device.edit().remove(LEGACY_TIMED).commit()
+    }
+
+    /**
+     * This phone's Keystore turned the fingerprint key down right after a valid fingerprint: from then on the keys and
+     * the app code's fingerprint go by the key the fingerprint or the screen lock opens.
+     */
+    fun anyOnly(): Boolean = device.getBoolean(ANY_ONLY, false)
+
+    /** From now on the screen-lock key; the fingerprint key stays only while it holds the saved keys. */
+    internal fun markAnyOnly() {
+        check(device.edit().putBoolean(ANY_ONLY, true).commit()) { "No se pudo guardar la clave" }
+        val holdsKeys = hasKeys() && (savedAlias() ?: FINGERPRINT_ALIAS) == FINGERPRINT_ALIAS
+        if (!holdsKeys) phone.delete(FINGERPRINT_ALIAS)
+    }
+
+    override fun phoneLock(): PhoneLock = lock(phoneAlias())
+
+    override fun lockOf(cipher: Cipher): PhoneLock = lock(synchronized(issued) { issued[cipher] } ?: phoneAlias())
+
+    private fun lock(alias: String?): PhoneLock = when (alias) {
+        FINGERPRINT_ALIAS -> PhoneLock.FINGERPRINT
+        ANY_ALIAS -> PhoneLock.ANY
+        else -> PhoneLock.NONE
+    }
+
+    private fun issue(cipher: Cipher, alias: String): Cipher = cipher.also { synchronized(issued) { issued[it] = alias } }
+
+    override fun hasKeys(): Boolean = preferences.contains(CIPHERTEXT) && preferences.contains(IV)
+
+    override fun underCode(): Boolean = hasKeys() && savedAlias() == CODE_ALIAS
 
     override fun reset() {
         check(preferences.edit().clear().commit()) { "No se pudo borrar la clave" }
-        for (alias in listOf(KEY_ALIAS, TIMED_ALIAS, GATE_ALIAS)) if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+        (ALIASES + LEGACY_ALIASES).forEach(phone::delete)
     }
 
-    override fun encryptCipher(): Cipher = if (timed) gateCipher() else try {
-        Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, key(KEY_ALIAS, 0)) }
-    } catch (_: KeyPermanentlyInvalidatedException) {
-        reset()
-        encryptCipher()
+    override fun encryptCipher(): Cipher {
+        val alias = checkNotNull(phoneAlias()) { AppController.NO_LOCK }
+        phone.ensure(alias, if (alias == FINGERPRINT_ALIAS) KeyAuth.FINGERPRINT else KeyAuth.ANY)
+        return try {
+            issue(phone.cipher(alias, Cipher.ENCRYPT_MODE), alias)
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            // A new fingerprint killed it: what it held cannot be opened, and the save writes the blob anew.
+            phone.delete(alias)
+            encryptCipher()
+        }
     }
 
     override fun encrypt(authorized: Cipher, plaintext: ByteArray) {
-        val cipher = if (timed) timedCipher(Cipher.ENCRYPT_MODE) else authorized
+        val alias = checkNotNull(synchronized(issued) { issued[authorized] }) { "No se pudo guardar la clave" }
+        check(alias != CODE_ALIAS) { "No se pudo guardar la clave" }
         val encrypted = try {
-            cipher.doFinal(plaintext)
+            phone.finish(authorized, plaintext)
         } catch (e: Exception) {
-            if (timed || !rejectedAfterFingerprint(e)) throw e
-            // This Keystore cannot use a per-use key: the fingerprint just passed, so the timed key opens now.
-            check(device.edit().putBoolean("timed", true).commit()) { "No se pudo guardar la clave" }
-            if (keyStore.containsAlias(KEY_ALIAS)) keyStore.deleteEntry(KEY_ALIAS)
-            return encrypt(authorized, plaintext)
+            if (alias != FINGERPRINT_ALIAS || !rejectedAfterFingerprint(e)) throw e
+            markAnyOnly()
+            throw VaultMoved()
         }
-        check(preferences.edit()
-            .putString("ciphertext", Base64.encodeToString(encrypted, Base64.NO_WRAP))
-            .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .commit()) { "No se pudo guardar la clave" }
+        save(alias, encrypted, authorized.iv)
     }
 
     override fun decryptCipher(): Cipher? {
         check(hasKeys()) { "No hay claves guardadas" }
+        // A blob without its key's name was saved by 1.2 and earlier, always under the fingerprint key.
+        val alias = savedAlias() ?: FINGERPRINT_ALIAS
         return try {
-            if (timed) {
-                // Only to learn whether a new fingerprint killed the key: without a recent fingerprint it cannot open.
-                try {
-                    Cipher.getInstance(TRANSFORMATION).init(Cipher.DECRYPT_MODE, key(TIMED_ALIAS, TIMED_SECONDS), GCMParameterSpec(128, iv()))
-                } catch (_: UserNotAuthenticatedException) {
-                }
-                gateCipher()
-            } else {
-                Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.DECRYPT_MODE, key(KEY_ALIAS, 0), GCMParameterSpec(128, iv())) }
-            }
+            issue(phone.cipher(alias, Cipher.DECRYPT_MODE, iv()), alias)
         } catch (_: KeyPermanentlyInvalidatedException) {
             reset()
             null
         }
     }
 
-    override fun decrypt(authorized: Cipher): ByteArray =
-        (if (timed) timedCipher(Cipher.DECRYPT_MODE) else authorized)
-            .doFinal(Base64.decode(requireNotNull(preferences.getString("ciphertext", null)), Base64.NO_WRAP))
+    override fun decrypt(authorized: Cipher): ByteArray = phone.finish(authorized, ciphertext())
 
-    private fun iv(): ByteArray = Base64.decode(requireNotNull(preferences.getString("iv", null)), Base64.NO_WRAP)
-
-    /** The timed key's cipher, right after the fingerprint. */
-    private fun timedCipher(mode: Int): Cipher = Cipher.getInstance(TRANSFORMATION).apply {
-        if (mode == Cipher.ENCRYPT_MODE) init(mode, key(TIMED_ALIAS, TIMED_SECONDS))
-        else init(mode, key(TIMED_ALIAS, TIMED_SECONDS), GCMParameterSpec(128, iv()))
+    override fun encrypt(code: CodeKey, plaintext: ByteArray) {
+        val (ciphertext, iv) = seal(code, plaintext)
+        save(CODE_ALIAS, ciphertext, iv)
     }
 
-    /** What the prompt authorizes in timed mode; it never encrypts anything. */
-    private fun gateCipher(): Cipher = try {
-        Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, key(GATE_ALIAS, 0)) }
-    } catch (_: KeyPermanentlyInvalidatedException) {
-        keyStore.deleteEntry(GATE_ALIAS)
-        gateCipher()
+    /** [plaintext] under the code's key, wrapped by the phone-bound key: the ciphertext and the wrap's IV. */
+    private fun seal(code: CodeKey, plaintext: ByteArray): Pair<ByteArray, ByteArray> {
+        val inner = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, SecretKeySpec(code.bytes, "AES")) }
+        val sealed = inner.iv + inner.doFinal(plaintext)
+        try {
+            phone.ensure(CODE_ALIAS, KeyAuth.NONE)
+            val outer = phone.cipher(CODE_ALIAS, Cipher.ENCRYPT_MODE)
+            return phone.finish(outer, sealed) to outer.iv
+        } finally {
+            sealed.fill(0)
+        }
     }
+
+    override fun decrypt(code: CodeKey): ByteArray {
+        check(underCode()) { "No hay claves guardadas con el código" }
+        try {
+            return open(code, CIPHERTEXT, IV).also { if (preferences.contains(STAGED)) clearStaged() }
+        } catch (e: AEADBadTagException) {
+            if (!preferences.contains(STAGED)) throw KeysLost()
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            throw KeysLost()
+        }
+        // The code was changed and the process died before the staged blob became current: it is the one.
+        return try {
+            open(code, STAGED, STAGED_IV).also { promote() }
+        } catch (_: AEADBadTagException) {
+            throw KeysLost()
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            throw KeysLost()
+        }
+    }
+
+    /** The plaintext of the code's blob at [ciphertextName] / [ivName]. */
+    private fun open(code: CodeKey, ciphertextName: String, ivName: String): ByteArray {
+        val sealed = phone.finish(phone.cipher(CODE_ALIAS, Cipher.DECRYPT_MODE, bytes(ivName)), bytes(ciphertextName))
+        try {
+            val inner = Cipher.getInstance(TRANSFORMATION)
+            inner.init(Cipher.DECRYPT_MODE, SecretKeySpec(code.bytes, "AES"), GCMParameterSpec(128, sealed, 0, GCM_IV))
+            return inner.doFinal(sealed, GCM_IV, sealed.size - GCM_IV)
+        } finally {
+            sealed.fill(0)
+        }
+    }
+
+    override fun stage(code: CodeKey, plaintext: ByteArray) {
+        check(underCode()) { "No hay claves guardadas con el código" }
+        val (ciphertext, iv) = seal(code, plaintext)
+        check(preferences.edit()
+            .putString(STAGED, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+            .putString(STAGED_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
+            .commit()) { "No se pudo guardar la clave" }
+    }
+
+    /** One commit: the staged blob replaces the current one, or nothing changes. */
+    override fun promote() {
+        val ciphertext = preferences.getString(STAGED, null) ?: return
+        val iv = requireNotNull(preferences.getString(STAGED_IV, null))
+        check(preferences.edit().putString(CIPHERTEXT, ciphertext).putString(IV, iv).remove(STAGED).remove(STAGED_IV).commit()) {
+            "No se pudo guardar la clave"
+        }
+    }
+
+    private fun clearStaged() {
+        preferences.edit().remove(STAGED).remove(STAGED_IV).commit()
+    }
+
+    override fun savedLock(): PhoneLock? = if (!hasKeys() || underCode()) null else lock(savedAlias() ?: FINGERPRINT_ALIAS)
+
+    /** Writes the blob under [alias] and drops the keys that no longer hold anything. */
+    private fun save(alias: String, ciphertext: ByteArray, iv: ByteArray) {
+        check(preferences.edit()
+            .putString(CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+            .putString(IV, Base64.encodeToString(iv, Base64.NO_WRAP))
+            .putString(ALIAS, alias)
+            .commit()) { "No se pudo guardar la clave" }
+        ALIASES.filter { it != alias }.forEach(phone::delete)
+    }
+
+    private fun savedAlias(): String? = preferences.getString(ALIAS, null)
 
     /**
-     * The key at [alias], made on first use: for every use with the fingerprint (`seconds = 0`), or for [seconds] after
-     * the fingerprint or the screen lock.
+     * The phone-lock key for the next save: on a phone marked [anyOnly] always the screen-lock one; otherwise the one
+     * holding the blob, or the one this phone takes now. Null without a secure screen lock.
      */
-    private fun key(alias: String, seconds: Int): SecretKey {
-        if (!keyStore.containsAlias(alias)) KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-            init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .setUserAuthenticationRequired(true)
-                .setUserAuthenticationParameters(seconds,
-                    if (seconds == 0) KeyProperties.AUTH_BIOMETRIC_STRONG
-                    else KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
-                .setInvalidatedByBiometricEnrollment(seconds == 0)
-                .build())
-            generateKey()
+    private fun phoneAlias(): String? {
+        if (anyOnly()) return ANY_ALIAS.takeIf { phone.secureLock() }
+        if (hasKeys()) (savedAlias() ?: FINGERPRINT_ALIAS).takeIf { it != CODE_ALIAS }?.let { return it }
+        return when {
+            !phone.secureLock() -> null
+            phone.fingerprint() -> FINGERPRINT_ALIAS
+            else -> ANY_ALIAS
         }
-        return keyStore.getKey(alias, null) as SecretKey
     }
 
-    /** The Keystore turned down the per-use key that the fingerprint had just authorized. */
-    private fun rejectedAfterFingerprint(error: Throwable): Boolean = generateSequence(error) { it.cause }.any {
-        it is UserNotAuthenticatedException ||
-            (it is KeyStoreException && it.numericErrorCode == KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED)
-    }
+    private fun iv(): ByteArray = bytes(IV)
+    private fun ciphertext(): ByteArray = bytes(CIPHERTEXT)
+    private fun bytes(name: String): ByteArray = Base64.decode(requireNotNull(preferences.getString(name, null)), Base64.NO_WRAP)
 
-    private companion object {
-        const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val KEY_ALIAS = "dev.duardo.neotransfer.bank-keys"
-        const val TIMED_ALIAS = "dev.duardo.neotransfer.bank-keys.timed"
-        const val GATE_ALIAS = "dev.duardo.neotransfer.bank-keys.gate"
-        const val TIMED_SECONDS = 10
+    internal companion object {
+        const val FINGERPRINT_ALIAS = "dev.duardo.neotransfer.bank-keys"
+        const val ANY_ALIAS = "dev.duardo.neotransfer.bank-keys.any"
+        const val CODE_ALIAS = "dev.duardo.neotransfer.bank-keys.code"
+        private val ALIASES = listOf(FINGERPRINT_ALIAS, ANY_ALIAS, CODE_ALIAS)
+        /** PR #3's keys and flag, on the test build the realme tester ran. */
+        private val LEGACY_ALIASES = listOf("dev.duardo.neotransfer.bank-keys.timed", "dev.duardo.neotransfer.bank-keys.gate")
+        private const val LEGACY_TIMED = "timed"
+        private const val CIPHERTEXT = "ciphertext"
+        private const val IV = "iv"
+        private const val ALIAS = "alias"
+        private const val STAGED = "staged_ciphertext"
+        private const val STAGED_IV = "staged_iv"
+        private const val ANY_ONLY = "any_only"
+        private const val GCM_IV = 12
     }
 }

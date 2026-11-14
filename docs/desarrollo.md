@@ -25,7 +25,7 @@ En Linux o macOS, `./gradlew` con las mismas tareas. Los módulos se describen e
 
 - `:core:test`: contratos del protocolo (los 1.400 vectores del codificador, los 800 QR, el orden de parámetros de cada operación y que ninguna produzca `60`, `49`, `58`, `68` ni `69`), plantillas de SMS, escenarios del libro de operaciones, QR y respaldo.
 - `:scanner:testDebugUnitTest`: lectura de números, QR en imágenes y seguimiento entre cuadros.
-- `:app:testDebugUnitTest`: el controlador con módem y bandeja falsos, las notificaciones y Room.
+- `:app:testDebugUnitTest`: el controlador con módem y bandeja falsos, las notificaciones y Room; el almacén de claves y el código de acceso sobre un Keystore falso (`FakePhoneKeys`: huella, bloqueo de pantalla, inscripción de una huella nueva y el rechazo del realme).
 
 Las pruebas usan datos inventados. Los SMS de las plantillas son sintéticos.
 
@@ -72,6 +72,8 @@ Esos archivos nunca van al repositorio.
 | `debug` | `dev.duardo.neotransfer.debug` | Desarrollo con la SIM y los SMS reales. Se instala al lado de la versión publicada |
 | `preview` | `dev.duardo.neotransfer.preview` | Banco simulado: nunca envía USSD ni lee la bandeja real |
 | `release` | `dev.duardo.neotransfer` | La que se publica: R8 con reducción de recursos |
+
+El sufijo del paquete (`""`, `.debug`, `.preview`) va también en el permiso de sincronización (`dev.duardo.neotransfer.permission.SYNC_CONTACTS<sufijo>`) y en la autoridad de NeoTransfer+ (`dev.duardo.neotransfer.plus<sufijo>.sync`), por un placeholder del manifiesto y `BuildConfig.VARIANT_SUFFIX` (`app/build.gradle.kts`, `variantSuffix`). Así cada variante se instala junto a las demás aunque las firme otra clave, y sincroniza con la misma variante de NeoTransfer+.
 
 ### `preview`
 

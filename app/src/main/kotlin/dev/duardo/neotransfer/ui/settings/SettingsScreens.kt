@@ -38,6 +38,7 @@ import dev.duardo.neotransfer.designsystem.component.NeoGroup
 import dev.duardo.neotransfer.designsystem.component.NeoIconButton
 import dev.duardo.neotransfer.designsystem.component.NeoRow
 import dev.duardo.neotransfer.designsystem.component.NeoSegmented
+import dev.duardo.neotransfer.designsystem.component.NeoSwitch
 import dev.duardo.neotransfer.designsystem.component.NeoTextField
 import dev.duardo.neotransfer.designsystem.component.NeoTopBar
 import dev.duardo.neotransfer.designsystem.component.SectionHeader
@@ -59,6 +60,8 @@ import dev.duardo.neotransfer.ui.model.Bank
 import dev.duardo.neotransfer.ui.model.BankLineUi
 import dev.duardo.neotransfer.ui.model.BankSettingsUi
 import dev.duardo.neotransfer.ui.model.ClassicSettingsUi
+import dev.duardo.neotransfer.ui.model.CodeSettingsUi
+import dev.duardo.neotransfer.ui.model.KeyProtection
 import dev.duardo.neotransfer.ui.model.RemovalUi
 import dev.duardo.neotransfer.ui.model.SettingsUi
 import dev.duardo.neotransfer.ui.model.TransfermovilImportUi
@@ -92,6 +95,8 @@ interface SettingsActions {
     fun bank(bank: Bank)
     fun appearance(value: Appearance)
     fun notifications()
+    /** Código de acceso: its settings, or setting one. */
+    fun code()
     fun backup()
     fun importTransfermovil()
     fun about()
@@ -138,6 +143,14 @@ fun SettingsScreen(state: SettingsUi, actions: SettingsActions, modifier: Modifi
             )
             GroupDivider()
             NeoRow(
+                "Código de acceso",
+                supporting = if (state.code) "Activado" else "Desactivado",
+                leading = { IconAvatar(Ds.drawable.ic_lock) },
+                trailing = { Chevron() },
+                onClick = actions::code,
+            )
+            GroupDivider()
+            NeoRow(
                 "Respaldo",
                 supporting = state.lastBackup?.let { "Último: ${timeLabels.moment(it)}" } ?: "Sin respaldos",
                 leading = { IconAvatar(Ds.drawable.ic_settings_backup_restore) },
@@ -158,6 +171,51 @@ fun SettingsScreen(state: SettingsUi, actions: SettingsActions, modifier: Modifi
                 leading = { IconAvatar(Ds.drawable.ic_info) },
                 trailing = { Chevron() },
                 onClick = actions::about,
+            )
+        }
+    }
+}
+
+/** «Guardada con tu huella», «Guardado con el bloqueo de pantalla»…: a key is feminine, MiTransfer's PIN is not. */
+private fun KeyProtection.savedWith(feminine: Boolean): String = (if (feminine) "Guardada" else "Guardado") + when (this) {
+    KeyProtection.Fingerprint -> " con tu huella"
+    KeyProtection.ScreenLock -> " con el bloqueo de pantalla"
+    KeyProtection.Code -> " con el código de acceso"
+}
+
+// ---- App code ---------------------------------------------------------------------------------------------
+
+interface CodeSettingsActions {
+    fun back()
+    /** Cambiar código: the current one first. */
+    fun change()
+    fun protectKeys(on: Boolean)
+    /** Desactivar código: asked in a sheet, with the code. */
+    fun disable()
+}
+
+/** Ajustes › Código de acceso, while it is on: changing it, whether it also guards the keys, and turning it off in red. */
+@Composable
+fun CodeSettingsScreen(state: CodeSettingsUi, actions: CodeSettingsActions, modifier: Modifier = Modifier) {
+    SettingsScaffold("Código de acceso", actions::back, modifier) {
+        NeoGroup {
+            NeoRow("Cambiar código", leading = { IconAvatar(Ds.drawable.ic_lock_reset) }, trailing = { Chevron() }, onClick = actions::change)
+            GroupDivider()
+            NeoRow(
+                "Usar también para las claves",
+                supporting = if (state.fingerprint) "Menos seguro que la huella" else "Menos seguro que el bloqueo de pantalla",
+                leading = { IconAvatar(Ds.drawable.ic_key) },
+                trailing = { NeoSwitch(state.protectsKeys, null) },
+                onClick = { actions.protectKeys(!state.protectsKeys) },
+                wrapTitle = true,
+            )
+        }
+        NeoGroup(Modifier.padding(top = NeoSpace.xxl)) {
+            NeoRow(
+                "Desactivar código",
+                leading = { IconAvatar(Ds.drawable.ic_lock, tint = Neo.colors.danger) },
+                titleColor = Neo.colors.danger,
+                onClick = actions::disable,
             )
         }
     }
@@ -229,7 +287,7 @@ fun BankSettingsScreen(
             GroupDivider()
             NeoRow(
                 if (state.keySaved) "Clave guardada" else "Guardar clave",
-                supporting = if (state.keySaved) "Escríbela si la cambiaste en otro sitio" else null,
+                supporting = if (state.keySaved) state.protection.savedWith(feminine = true) else null,
                 leading = { IconAvatar(Ds.drawable.ic_key) },
                 trailing = { Chevron() },
                 onClick = actions::savedKey,
@@ -327,7 +385,11 @@ fun ClassicSettingsScreen(
         NeoGroup {
             NeoRow(
                 if (state.pinSaved) "PIN guardado" else "Guardar PIN",
-                supporting = if (state.keyToSave == null && state.pinSaved) "Escríbelo si lo cambiaste en otro sitio" else null,
+                supporting = if (state.keyToSave == null && state.pinSaved) {
+                    state.protection.savedWith(feminine = false)
+                } else {
+                    null
+                },
                 supportingContent = state.keyToSave?.let { { NoteText(LineNote("PIN nuevo por guardar", StatusTone.Warning)) } },
                 leading = { IconAvatar(Ds.drawable.ic_key) },
                 trailing = { Chevron() },

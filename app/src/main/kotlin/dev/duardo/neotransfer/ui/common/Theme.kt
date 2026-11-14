@@ -8,6 +8,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import dev.duardo.neotransfer.designsystem.R as Ds
 import dev.duardo.neotransfer.designsystem.theme.NeoAccents
 import dev.duardo.neotransfer.designsystem.theme.NeoTheme
 import dev.duardo.neotransfer.ui.model.Appearance
@@ -15,6 +16,13 @@ import java.time.Clock
 
 /** Time source for relative labels ("hace 5 min"); fixed in previews and tests. */
 val LocalClock = staticCompositionLocalOf<Clock> { Clock.systemDefaultZone() }
+
+/**
+ * The icon of an action that is confirmed before it goes: the fingerprint only where the prompt takes the fingerprint
+ * alone; the lock where it takes the screen lock too (no usable fingerprint, or a phone whose fingerprint keys never
+ * authorize) or where the app code confirms it; none on a phone with no lock at all.
+ */
+val LocalPromptIcon = staticCompositionLocalOf<Int?> { Ds.drawable.ic_fingerprint }
 
 @Composable
 fun NeoTransferTheme(appearance: Appearance = Appearance.System, clock: Clock = Clock.systemDefaultZone(), content: @Composable () -> Unit) {

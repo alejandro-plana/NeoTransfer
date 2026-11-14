@@ -13,7 +13,35 @@ sealed interface LockUi {
     /** The prompt was dismissed: one action to show it again, no loop. */
     data object Cancelled : LockUi
     data class LockedOut(val seconds: Int) : LockUi
+
+    /**
+     * The app code is on: it is typed here, the fingerprint in its place when [fingerprint]. [forgot]: the sheet of
+     * «¿Olvidaste el código?». [creating]: a new code is being set after the fingerprint stood in for the forgotten one.
+     */
+    data class Code(val code: CodeUi, val fingerprint: Boolean, val forgot: ForgotCodeUi? = null, val creating: Boolean = false) : LockUi
 }
+
+/**
+ * The app code as it is typed: what is asked ([title]), how many digits are in, what went wrong ([error]) and what
+ * follows from it ([note]). [waiting]: too many wrong ones, no digit is taken until the wait in [error] ends.
+ */
+@Immutable
+data class CodeUi(val title: String, val entered: Int, val error: String? = null, val note: String? = null, val waiting: Boolean = false)
+
+/**
+ * «¿Olvidaste el código?»: the fingerprint is a way back in when [fingerprint]; erasing the app's data always is.
+ * [erasing]: the sheet asks to confirm the erase, straight away when there is no fingerprint to offer. [erasesKeys]: the
+ * keys are under the code, so a new code after the fingerprint loses them.
+ */
+@Immutable
+data class ForgotCodeUi(val fingerprint: Boolean, val erasing: Boolean = !fingerprint, val erasesKeys: Boolean = false)
+
+/** Ajustes › Código de acceso. [fingerprint]: the phone has a usable fingerprint, what the code is weighed against. */
+@Immutable
+data class CodeSettingsUi(val protectsKeys: Boolean, val fingerprint: Boolean = true)
+
+/** What keeps the saved keys: the fingerprint, the screen lock or the app code. */
+enum class KeyProtection { Fingerprint, ScreenLock, Code }
 
 enum class PermissionKind { Sms, Phone, Contacts, Camera, Notifications }
 
@@ -325,11 +353,13 @@ data class SettingsUi(
     val notifications: Boolean,
     val lastBackup: Instant?,
     val version: String,
+    /** The app code is on. */
+    val code: Boolean = false,
 )
 
 
 @Immutable
-data class BankSettingsUi(val bank: Bank, val cards: List<WalletCardUi>, val keySaved: Boolean)
+data class BankSettingsUi(val bank: Bank, val cards: List<WalletCardUi>, val keySaved: Boolean, val protection: KeyProtection = KeyProtection.Fingerprint)
 
 @Immutable
 sealed interface BackupUi {
@@ -429,7 +459,13 @@ data class RemovalUi(val bank: Bank, val fields: List<FieldUi>, val canSend: Boo
 
 /** Ajustes › Clásica: the card, «PIN guardado» and removing its association with MiTransfer ([removal]). */
 @Immutable
-data class ClassicSettingsUi(val card: WalletCardUi, val pinSaved: Boolean, val removal: LineRequestUi?, val keyToSave: KeyToSaveUi?)
+data class ClassicSettingsUi(
+    val card: WalletCardUi,
+    val pinSaved: Boolean,
+    val removal: LineRequestUi?,
+    val keyToSave: KeyToSaveUi?,
+    val protection: KeyProtection = KeyProtection.Fingerprint,
+)
 
 /** What a bank's registration (`49`) asks, in its order ([dev.duardo.neotransfer.app.registrationFields]). */
 enum class RegistrationField(val label: String, val shape: FieldShape? = null) {

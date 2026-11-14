@@ -76,6 +76,7 @@ import dev.duardo.neotransfer.designsystem.format.unbroken
 import dev.duardo.neotransfer.designsystem.theme.Neo
 import dev.duardo.neotransfer.designsystem.theme.NeoRadius
 import dev.duardo.neotransfer.designsystem.theme.NeoSpace
+import dev.duardo.neotransfer.ui.common.LocalPromptIcon
 import dev.duardo.neotransfer.ui.common.PhoneTransformation
 import dev.duardo.neotransfer.ui.common.SourceCardPicker
 import dev.duardo.neotransfer.ui.transfer.RecentChip
@@ -241,7 +242,7 @@ fun ServiceFormScreen(state: ServiceFormUi, actions: ServiceFormActions, modifie
                 if (state.cards.isNotEmpty()) SourceCardPicker(state.cards, state.source, actions::source, label = "Desde")
             }
             BottomAction {
-                NeoButton(state.action, actions::submit, enabled = state.canContinue, icon = if (state.cards.isNotEmpty()) Ds.drawable.ic_fingerprint else null)
+                NeoButton(state.action, actions::submit, enabled = state.canContinue, icon = if (state.cards.isNotEmpty()) LocalPromptIcon.current else null)
             }
         }
     }

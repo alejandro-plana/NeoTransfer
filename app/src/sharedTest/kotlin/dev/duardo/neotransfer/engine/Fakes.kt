@@ -63,16 +63,95 @@ class FakeInbox : SmsInbox {
     }
 }
 
-/** Keeps the blob in memory; ciphers are never used for real. */
-class FakeVault : KeyVault {
+/**
+ * Keeps the blob in memory; ciphers are never used for real. Under the code it remembers the code's key and refuses
+ * another, as the real vault's GCM tag would. [lock] is what the phone has.
+ */
+class FakeVault(@Volatile var lock: PhoneLock = PhoneLock.FINGERPRINT) : KeyVault {
     @Volatile private var blob: ByteArray? = null
+    @Volatile private var codeKey: ByteArray? = null
+    @Volatile private var staged: Pair<ByteArray, ByteArray>? = null
+    /** What opening the blob under the code throws next, besides a wrong key (a storage or Keystore hiccup). */
+    @Volatile var failure: Exception? = null
+    override fun phoneLock() = lock
+    override fun lockOf(cipher: Cipher) = lock
     override fun hasKeys() = blob != null
+    override fun underCode() = blob != null && codeKey != null
     override fun decryptCipher(): Cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    override fun decrypt(authorized: Cipher): ByteArray = checkNotNull(blob).copyOf()
-    override fun encryptCipher(): Cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    override fun encrypt(authorized: Cipher, plaintext: ByteArray) { blob = plaintext.copyOf() }
-    override fun reset() { blob = null }
+    override fun decrypt(authorized: Cipher): ByteArray = checkNotNull(blob).also { check(codeKey == null) }.copyOf()
+    override fun encryptCipher(): Cipher {
+        check(lock != PhoneLock.NONE) { "Sin bloqueo" }
+        return Cipher.getInstance("AES/GCM/NoPadding")
+    }
+    override fun encrypt(authorized: Cipher, plaintext: ByteArray) {
+        check(lock != PhoneLock.NONE) { "Sin bloqueo" }
+        blob = plaintext.copyOf()
+        codeKey = null
+    }
+    override fun decrypt(code: CodeKey): ByteArray {
+        failure?.let { failure = null; throw it }
+        if (codeKey?.contentEquals(code.bytes) == true) return checkNotNull(blob).copyOf().also { staged = null }
+        val (key, plaintext) = staged ?: throw KeysLost()
+        if (!key.contentEquals(code.bytes)) throw KeysLost()
+        promote()
+        return plaintext.copyOf()
+    }
+    override fun stage(code: CodeKey, plaintext: ByteArray) { staged = code.bytes.copyOf() to plaintext.copyOf() }
+    override fun promote() {
+        val (key, plaintext) = staged ?: return
+        codeKey = key
+        blob = plaintext
+        staged = null
+    }
+    override fun savedLock(): PhoneLock? = if (blob == null || codeKey != null) null else lock
+    override fun encrypt(code: CodeKey, plaintext: ByteArray) {
+        blob = plaintext.copyOf()
+        codeKey = code.bytes.copyOf()
+    }
+    override fun reset() {
+        blob = null
+        codeKey = null
+    }
     fun contains(text: String) = blob?.toString(Charsets.US_ASCII)?.contains(text) == true
+}
+
+/**
+ * The app code in memory: its "key" is the code's digits, so another code opens nothing. Waits run on [elapsed], the
+ * clock since boot.
+ */
+class FakeAppCode(private val elapsed: () -> Long = System::currentTimeMillis) : AppCode {
+    @Volatile private var code: String? = null
+    @Volatile private var protects = false
+    @Volatile private var attempts = CodeAttempts()
+    @Volatile private var waitFrom = 0L
+    /** The fingerprint stands in for the code; false as after a new enrollment or on a phone that turns it down. */
+    @Volatile var fingerprint = true
+    override fun active() = code != null
+    override fun protectsKeys() = active() && protects
+    override fun setProtectsKeys(on: Boolean) { protects = on }
+    override fun check(code: CharArray): CodeKey? = String(code).takeIf { it == this.code }?.let { CodeKey(it.toByteArray()) }
+    override fun prepare(code: CharArray) = PreparedCode(CodeKey(String(code).toByteArray()), ByteArray(0), 0)
+    override fun commit(prepared: PreparedCode) {
+        code = String(prepared.key.bytes)
+        fingerprint = true
+    }
+    override fun clear() {
+        code = null
+        protects = false
+        attempts = CodeAttempts()
+    }
+    override fun attempts(): CodeAttempts {
+        val wait = attempts.wait ?: return attempts
+        val left = (wait.toMillis() - (elapsed() - waitFrom)).coerceIn(0, wait.toMillis())
+        return attempts.copy(wait = java.time.Duration.ofMillis(left).takeIf { left > 0 })
+    }
+    override fun saveAttempts(attempts: CodeAttempts) {
+        this.attempts = attempts
+        waitFrom = elapsed()
+    }
+    override fun fingerprintCipher(): Cipher? = if (active() && fingerprint) Cipher.getInstance("AES/GCM/NoPadding") else null
+    override fun fingerprintPassed(authorized: Cipher) = fingerprint
+    override fun renewFingerprint() { fingerprint = true }
 }
 
 class FakeNotifier : Notifier {
@@ -113,7 +192,7 @@ class MemoryStore : Store {
     override suspend fun savePreferences(preferences: Preferences) { this.preferences = preferences }
 }
 
-/** One process of the app on a device made of [store], [inbox] and [vault]. */
+/** One process of the app on a device made of [store], [inbox], [vault] and [code]. */
 class Rig(
     val store: Store = MemoryStore(),
     val inbox: FakeInbox = FakeInbox(),
@@ -122,6 +201,7 @@ class Rig(
     state: CoroutineDispatcher,
     io: CoroutineDispatcher,
     val modem: FakeModem = FakeModem(),
+    val code: FakeAppCode = FakeAppCode(),
 ) {
     val notifier = FakeNotifier()
     val documents = FakeDocuments()
@@ -131,7 +211,7 @@ class Rig(
     var peer: () -> List<ContactRecord>? = { null }
     /** NeoTransfer+'s operations; null as if it were not installed. */
     var peerActivity: () -> List<ActivityRow>? = { null }
-    val controller = AppController(store, modem, inbox, vault, notifier, documents, { addressBook ?: throw SecurityException() }, { peer() },
+    val controller = AppController(store, modem, inbox, vault, code, notifier, documents, { addressBook ?: throw SecurityException() }, { peer() },
         { peerActivity() }, clock, state, io)
 
     fun status(id: String) = controller.operations.value.first { it.operation.id == id }

@@ -54,6 +54,7 @@ import dev.duardo.neotransfer.data.WalletCard
 import dev.duardo.neotransfer.designsystem.format.formatCardNumber
 import dev.duardo.neotransfer.designsystem.format.formatPhone
 import dev.duardo.neotransfer.engine.CardView
+import dev.duardo.neotransfer.engine.CodeStatus
 import dev.duardo.neotransfer.engine.KeyToSave
 import dev.duardo.neotransfer.engine.Notices
 import dev.duardo.neotransfer.ui.model.BalanceUi
@@ -106,9 +107,13 @@ data class Domain(
     val addressBook: Set<String>? = null,
     /** The operations NeoTransfer+ made ([ActivityRow]); null while it is not installed or cannot be read: nothing of it shows. */
     val peer: List<ActivityRow>? = null,
+    val code: CodeStatus = CodeStatus(),
 ) {
-    /** A bank or the Clásica is set up once it has a card or a saved key: from then on the app locks. */
+    /** A bank or the Clásica is set up once it has a card or a saved key. */
     val configured: Boolean get() = cards.isNotEmpty() || classics.isNotEmpty() || savedKeys.isNotEmpty()
+
+    /** The app locks once something is set up, or with the app code on. */
+    val guarded: Boolean get() = configured || code.active
 }
 
 fun CoreBank.ui(): Bank = Bank.valueOf(name)

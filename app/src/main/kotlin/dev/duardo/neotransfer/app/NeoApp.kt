@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -30,8 +31,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.duardo.neotransfer.data.Theme
 import dev.duardo.neotransfer.designsystem.theme.NeoSpace
+import dev.duardo.neotransfer.ui.common.LocalPromptIcon
 import dev.duardo.neotransfer.ui.common.NeoTransferTheme
-import dev.duardo.neotransfer.ui.lock.LockActions
+import dev.duardo.neotransfer.ui.lock.CodeSheet
 import dev.duardo.neotransfer.ui.lock.LockScreen
 import dev.duardo.neotransfer.ui.model.Appearance
 import dev.duardo.neotransfer.ui.onboarding.PermissionsActions
@@ -55,30 +57,35 @@ fun NeoApp(model: AppModel) {
         Theme.LIGHT -> Appearance.Light
         Theme.DARK -> Appearance.Dark
     }
+    // Read again on each return to the foreground: a fingerprint or a screen lock may have been set meanwhile.
+    val promptIcon = remember(model.resumed, domain.savedKeys, domain.code) { model.promptIcon() }
     NeoTransferTheme(appearance, minuteClock()) {
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            val gate = model.permissionGate()
-            when {
-                !domain.loaded -> Unit
-                domain.locked && domain.configured -> {
-                    LockScreen(model.lock, LockActions(model::unlock))
-                    LaunchedEffect(Unit) { model.unlock() }
+        CompositionLocalProvider(LocalPromptIcon provides promptIcon) {
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                val gate = model.permissionGate()
+                when {
+                    !domain.loaded -> Unit
+                    domain.locked && domain.guarded -> {
+                        LockScreen(model.lockState(), model.lockActions)
+                        LaunchedEffect(Unit) { model.unlock() }
+                    }
+                    gate != null -> {
+                        PermissionsScreen(gate, object : PermissionsActions {
+                            override fun grant() = model.grantPermissions()
+                            override fun skip() = model.skipPermissions()
+                        })
+                        LaunchedEffect(Unit) { model.checkPermissions() }
+                    }
+                    !model.entered -> LaunchedEffect(Unit) { model.enter() }
+                    else -> Screens(model, book)
                 }
-                gate != null -> {
-                    PermissionsScreen(gate, object : PermissionsActions {
-                        override fun grant() = model.grantPermissions()
-                        override fun skip() = model.skipPermissions()
-                    })
-                    LaunchedEffect(Unit) { model.checkPermissions() }
-                }
-                !model.entered -> LaunchedEffect(Unit) { model.enter() }
-                else -> Screens(model, book)
+                model.codeAsk?.let { ask -> CodeSheet(ask.title, ask.check.ui(), ask.check::key, model::dismissCode, ask.subtitle) }
+                val tabbed = model.navigator.top is Main
+                SnackbarHost(
+                    model.messages,
+                    Modifier.align(Alignment.BottomCenter).imePadding().navigationBarsPadding().padding(bottom = if (tabbed) 72.dp else NeoSpace.l),
+                ) { Snackbar(it, containerColor = MaterialTheme.colorScheme.inverseSurface) }
             }
-            val tabbed = model.navigator.top is Main
-            SnackbarHost(
-                model.messages,
-                Modifier.align(Alignment.BottomCenter).imePadding().navigationBarsPadding().padding(bottom = if (tabbed) 72.dp else NeoSpace.l),
-            ) { Snackbar(it, containerColor = MaterialTheme.colorScheme.inverseSurface) }
         }
     }
 }

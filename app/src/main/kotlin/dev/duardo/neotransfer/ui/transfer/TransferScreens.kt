@@ -72,6 +72,7 @@ import dev.duardo.neotransfer.designsystem.format.unbroken
 import dev.duardo.neotransfer.designsystem.theme.Neo
 import dev.duardo.neotransfer.designsystem.theme.NeoMotion
 import dev.duardo.neotransfer.designsystem.theme.NeoSpace
+import dev.duardo.neotransfer.ui.common.LocalPromptIcon
 import dev.duardo.neotransfer.ui.common.CardNumberTransformation
 import dev.duardo.neotransfer.ui.common.ConfirmedMark
 import dev.duardo.neotransfer.ui.common.ForeignCardThumb
@@ -303,7 +304,7 @@ fun TransferReviewScreen(state: TransferReviewUi, actions: ReviewActions, modifi
             confirm = "Transferir ${formatMoney(state.amount.amount, state.amount.currency)}",
             onConfirm = actions::confirm,
             modifier = Modifier.padding(padding),
-            confirmIcon = Ds.drawable.ic_fingerprint,
+            confirmIcon = LocalPromptIcon.current,
             confirming = state.sending,
             lead = { RecipientHeader(state.recipient, avatar = 56.dp) },
             extra = {
