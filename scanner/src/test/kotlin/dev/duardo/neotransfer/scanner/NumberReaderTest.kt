@@ -28,42 +28,29 @@ private fun phones(vararg lines: OcrLine) = read(*lines).filter { it.kind == Num
 
 class NumberReaderTest {
     @Test
-    fun luhnAcceptsCubanCardsAndRejectsNearMisses() {
-        assertTrue(NumberReader.luhn(CARD))
-        assertTrue(NumberReader.luhn(CARD_2))
-        assertFalse(NumberReader.luhn("9204129951234567"))
-        assertTrue(NumberReader.isCard(CARD))
-        assertFalse(NumberReader.isCard("4539578763621486"), "Luhn-valid but outside the Cuban 92 range")
+    fun cardsAreLuhnValidCubanOrPersonalClassicNumbers() {
+        listOf(CARD, CARD_2, CLASSIC, CLASSIC_2).forEach { assertTrue(NumberReader.isCard(it), it) }
+        mapOf(
+            "9204129951234567" to "a Cuban card with a wrong check digit",
+            "4539578763621486" to "Luhn-valid but outside the Cuban 92 range",
+            "9760039900123456" to "a Clásica with a wrong check digit",
+            "9760049900123454" to "Luhn-valid, but Fincimex's business card",
+        ).forEach { (number, why) -> assertFalse(NumberReader.isCard(number), why) }
     }
 
     @Test
-    fun classicIsACardButNotTheBusinessOne() {
-        assertTrue(NumberReader.isCard(CLASSIC))
-        assertTrue(NumberReader.isCard(CLASSIC_2))
-        assertFalse(NumberReader.isCard("9760039900123456"), "a Clásica with a wrong check digit")
-        assertFalse(NumberReader.isCard("9760049900123454"), "Luhn-valid, but Fincimex's business card")
-    }
-
-    @Test
-    fun printedClassicInAnyGroupingOrOverTwoLines() {
-        assertEquals(listOf(CLASSIC), cards(line("Tarjeta: 9760 0399 0012 3455")))
-        assertEquals(listOf(CLASSIC), cards(line(CLASSIC)))
-        assertEquals(listOf(CLASSIC), cards(line("976003 9900 123455")))
-        assertEquals(listOf(CLASSIC_2), cards(line("9760 0377", y = 0f), line("0054 3211", y = 30f)))
-    }
-
-    @Test
-    fun misreadClassicOverTwoLinesProposesNothingInsteadOfAPhone() {
-        assertEquals(emptyList(), read(line("9760 0399", y = 0f), line("5123 4567", y = 30f)))
-    }
-
-    @Test
-    fun printedCardWithLabelAndAnyGrouping() {
-        assertEquals(listOf(CARD), cards(line("Tarjeta: 9204 1299 5123 4568")))
-        assertEquals(listOf(CARD), cards(line(CARD)))
-        assertEquals(listOf(CARD), cards(line("9204-1299-5123-4568")))
-        assertEquals(listOf(CARD), cards(line("92041299 51234568")))
-        assertEquals(listOf(CARD), cards(line("92 04 1299 5123 4568 01/29")))
+    fun printedCardsWithLabelInAnyGroupingOrOverTwoLines() {
+        listOf(
+            CARD to listOf(line("Tarjeta: 9204 1299 5123 4568")),
+            CARD to listOf(line(CARD)),
+            CARD to listOf(line("9204-1299-5123-4568")),
+            CARD to listOf(line("92041299 51234568")),
+            CARD to listOf(line("92 04 1299 5123 4568 01/29")),
+            CLASSIC to listOf(line("Tarjeta: 9760 0399 0012 3455")),
+            CLASSIC to listOf(line(CLASSIC)),
+            CLASSIC to listOf(line("976003 9900 123455")),
+            CLASSIC_2 to listOf(line("9760 0377", y = 0f), line("0054 3211", y = 30f)),
+        ).forEach { (card, lines) -> assertEquals(listOf(card), cards(*lines.toTypedArray()), lines.toString()) }
     }
 
     @Test
@@ -87,6 +74,7 @@ class NumberReaderTest {
         assertEquals(emptyList(), read(line("9204 1299 5123 4567")))
         assertEquals(emptyList(), read(line("8204 1299 5123 4568")), "4×4 layout on one row stays a card")
         assertEquals(emptyList(), read(line("9204 1299", y = 0f), line("5123 4567", y = 30f)))
+        assertEquals(emptyList(), read(line("9760 0399", y = 0f), line("5123 4567", y = 30f)), "a Clásica over two lines")
     }
 
     @Test

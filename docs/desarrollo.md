@@ -46,6 +46,12 @@ Las capturas de todas las pantallas tardan. Para regenerar solo algunas, filtra 
 .\gradlew.bat :app:testPreviewUnitTest --tests '*ScreenshotTest*' -Pscreens=home,transfer,activity
 ```
 
+Los recorridos pasan en claro, oscuro y claro con letra al 150 % para sus capturas. Con `-Pcaptures=false`, como en el CI, no se escribe ninguna captura, `ScreenshotTest` se salta y cada recorrido pasa una vez, en claro; el resultado puede venir entonces de la caché de compilación:
+
+```powershell
+.\gradlew.bat :app:testPreviewUnitTest -Pcaptures=false
+```
+
 ### En el teléfono
 
 ```powershell
@@ -54,7 +60,7 @@ Las capturas de todas las pantallas tardan. Para regenerar solo algunas, filtra 
 
 Necesitan un teléfono con Android 15 o posterior conectado por ADB, o un emulador ARM de 64 bits: todas las variantes traen bibliotecas nativas solo para `arm64-v8a`. Prueban Room, el controlador con Room real, los puntos de entrada (atajo, mosaico, receptor de SMS y el arranque limpio) y ML Kit con imágenes generadas. No envían USSD ni SMS: el módem y la bandeja son falsos.
 
-El CI (`.github/workflows/android.yml`) ejecuta `:core:test :app:testDebugUnitTest :app:assembleDebug :app:assemblePreview :app:assembleDebugAndroidTest :app:lintDebug`. Compila las pruebas instrumentadas, pero no las ejecuta.
+El CI (`.woodpecker/android.yaml`) ejecuta `:core:test :scanner:testDebugUnitTest :app:testPreviewUnitTest :app:assemblePreview :app:compileDebugAndroidTestKotlin :scanner:compileDebugAndroidTestKotlin :app:lintDebug` con `-Pcaptures=false` y la caché de compilación de Gradle. Compila las pruebas instrumentadas, pero no las ejecuta.
 
 ### Con datos reales, solo en local
 

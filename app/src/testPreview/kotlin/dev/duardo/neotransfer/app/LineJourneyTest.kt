@@ -308,6 +308,6 @@ class LineJourneyTest(private val mode: String) {
 
         @JvmStatic
         @ParameterizedRobolectricTestRunner.Parameters(name = "{0}")
-        fun modes(): List<Array<String>> = listOf("light", "dark", "font150").map { arrayOf(it) }
+        fun modes(): List<Array<String>> = journeyModes()
     }
 }
