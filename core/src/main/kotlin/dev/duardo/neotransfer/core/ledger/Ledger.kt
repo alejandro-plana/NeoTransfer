@@ -30,6 +30,7 @@ import dev.duardo.neotransfer.core.protocol.NautaService
 import dev.duardo.neotransfer.core.protocol.PhoneBill
 import dev.duardo.neotransfer.core.protocol.PinChange
 import dev.duardo.neotransfer.core.protocol.QrPay
+import dev.duardo.neotransfer.core.protocol.Source
 import dev.duardo.neotransfer.core.protocol.Transfer
 import dev.duardo.neotransfer.core.protocol.UssdRequest
 import dev.duardo.neotransfer.core.protocol.WaterBill
@@ -100,8 +101,12 @@ object Ledger {
 
     /** Longest gap between a send and the SMSC stamp of its answer that still correlates. */
     private val WINDOW = Duration.ofHours(2)
+    /** Longest a bank's USSD dialog stays open for the person to confirm a dialed request. */
+    private val DIALOG = Duration.ofMinutes(3)
     /** An answer cannot leave the SMSC much before the request left the phone. */
     private val SKEW = Duration.ofSeconds(30)
+    /** How far back the SMS received before one tell how far the phone's clock is from the SMSC's ([Book.leftAt]). */
+    private val CLOCK_WINDOW = Duration.ofMinutes(30)
 
     /** Creates a queued operation for a user request. */
     fun submit(id: String, request: UssdRequest, now: Instant): Operation = Operation(id, request, now)
@@ -149,7 +154,16 @@ object Ledger {
         /** The modem refused to send it ([reason]): nothing left the phone. */
         data class NotSent(val reason: String) : AuthStatus
         data object Busy : AuthStatus
-        data class Rejected(val at: Instant, val reason: String, val wrongPin: Boolean) : AuthStatus
+        /** [at] is on the phone's clock ([Book.leftAt]). */
+        data class Rejected(val at: Instant, val reason: String, val wrongPin: Boolean, val noBanking: Boolean) : AuthStatus {
+            /** Why the operation it was sent for never left. */
+            val stops: NotExecutedReason
+                get() = when {
+                    wrongPin -> NotExecutedReason.WRONG_PIN
+                    noBanking -> NotExecutedReason.NO_BANKING
+                    else -> NotExecutedReason.AUTHENTICATION
+                }
+        }
     }
 
     private class Book(val ops: List<Operation>, val sms: List<SmsRecord>, val now: Instant) {
@@ -159,7 +173,29 @@ object Ledger {
         val operationOf = mutableMapOf<Long, String>()
         val foreign = mutableListOf<SmsRecord>()
 
+        /**
+         * When each SMS left the SMSC, on the phone's clock: sends are timed by the phone and SMS stamped by the SMSC,
+         * and a phone set by hand may run an hour, or minutes, off. An SMS never arrives before it leaves, so the
+         * smallest gap between reception and stamp among the stamped SMS received in the [CLOCK_WINDOW] before one,
+         * itself included, is the closest there is to the difference between both clocks: the stamp plus that gap.
+         * SMS received later never change it; one without a stamp left when it was received.
+         */
+        private val leftAt: Map<Long, Instant> = run {
+            // Reception and gap of the SMS still in the window, gaps growing: the first is the smallest.
+            val window = ArrayDeque<Pair<Instant, Duration>>()
+            sms.sortedWith(compareBy({ it.receivedAt }, { it.id })).associate { record ->
+                if (record.sentAt == record.receivedAt) return@associate record.id to record.receivedAt
+                val gap = Duration.between(record.sentAt, record.receivedAt)
+                while (window.isNotEmpty() && window.last().second >= gap) window.removeLast()
+                window.addLast(record.receivedAt to gap)
+                while (window.first().first < record.receivedAt - CLOCK_WINDOW) window.removeFirst()
+                record.id to record.sentAt + window.first().second
+            }
+        }
+
         init { correlate() }
+
+        private fun left(record: SmsRecord): Instant = leftAt.getValue(record.id)
 
         private fun refused(op: Operation, attempt: Attempt) =
             op.request.agency != null && attempt.reply != null && BankResponse.parse(attempt.reply) == BankResponse.OTHER
@@ -168,12 +204,19 @@ object Ledger {
 
         /** An SMS can answer a send that left before it was received, at most [WINDOW] earlier. */
         private fun answers(attempt: Attempt, record: SmsRecord) = attempt.sentAt <= record.receivedAt &&
-            record.sentAt >= attempt.sentAt - SKEW && Duration.between(attempt.sentAt, record.sentAt) <= WINDOW
+            left(record) >= attempt.sentAt - SKEW && Duration.between(attempt.sentAt, left(record)) <= WINDOW
 
         private fun eligible(op: Operation, record: SmsRecord) =
             op.id !in resolved && op.attempts.any { usable(op, it) && answers(it, record) }
 
         private fun busyMarked(op: Operation) = op.attempts.indices.any { (op.id to it) in busy }
+
+        /**
+         * A dialed request is confirmed in the bank's dialog, which does not last [DIALOG]: one dialed longer before its
+         * receipt left was most likely left unanswered, and an equal one dialed since is the receipt's.
+         */
+        private fun unanswered(op: Operation, record: SmsRecord) = op.request.dialed &&
+            op.attempts.filter { usable(op, it) && answers(it, record) }.maxOf { it.sentAt } < left(record) - DIALOG
 
         private fun correlate() {
             val seenReferences = mutableSetOf<String>()
@@ -200,7 +243,7 @@ object Ledger {
                         message is SmsMessage.Registration && message.agency == null ->
                         listOfNotNull(candidates.singleOrNull())
                     else -> listOf(candidates.minWith(compareBy<Operation>({ !preferred(it.request, message) }, { busyMarked(it) },
-                        { it.attempts.first().sentAt })))
+                        { unanswered(it, record) }, { it.attempts.first().sentAt })))
                 }
                 chosen.forEach { resolved[it.id] = record }
                 chosen.firstOrNull()?.let { operationOf[record.id] = it.id }
@@ -213,7 +256,7 @@ object Ledger {
             ops.flatMap { op -> op.attempts.mapIndexed { index, attempt -> Triple(op, index, attempt) } }
                 .filter { (op, index, attempt) ->
                     op.id !in resolved && (op.id to index) !in busy && usable(op, attempt) && attempt.sentAt <= record.receivedAt &&
-                        attempt.sentAt <= record.sentAt + Duration.ofSeconds(5) && Duration.between(attempt.sentAt, record.sentAt) <= WINDOW
+                        attempt.sentAt <= left(record) + Duration.ofSeconds(5) && Duration.between(attempt.sentAt, left(record)) <= WINDOW
                 }
                 .maxByOrNull { it.third.sentAt }
                 ?.let { (op, index) -> busy[op.id to index] = record }
@@ -224,7 +267,7 @@ object Ledger {
         /** Driven by the acknowledgement; a late success SMS feeds the session, never revives the chain. */
         fun authStatus(auth: Operation): AuthStatus {
             (resolved[auth.id]?.message as? SmsMessage.AuthenticationFailed)?.let {
-                return AuthStatus.Rejected(resolved.getValue(auth.id).sentAt, it.reason, it.wrongPin)
+                return AuthStatus.Rejected(left(resolved.getValue(auth.id)), it.reason, it.wrongPin, it.noBanking)
             }
             val last = auth.attempts.lastOrNull() ?: return AuthStatus.Unsent
             return when {
@@ -267,14 +310,14 @@ object Ledger {
                 if (agency != null) {
                     op.attempts.forEach { events += Event(it.sentAt, agency, 0) }
                     (authStatus(op) as? AuthStatus.Accepted)?.let { events += Event(it.at, agency, 1) }
-                    resolved[op.id]?.takeIf { it.message is SmsMessage.Authenticated }?.let { events += Event(it.sentAt, agency, 1) }
+                    resolved[op.id]?.takeIf { it.message is SmsMessage.Authenticated }?.let { events += Event(left(it), agency, 1) }
                 } else if (op.request is Disconnect) {
                     op.attempts.lastOrNull()?.takeIf { it.reply != null }?.let { events += Event(it.repliedAt ?: it.sentAt, null, 2) }
                 }
             }
             for (record in foreign) when (val message = record.message) {
-                is SmsMessage.Authenticated -> events += Event(record.sentAt, message.agency, 1)
-                is SmsMessage.AuthenticationFailed -> events += Event(record.sentAt, message.agency, 2)
+                is SmsMessage.Authenticated -> events += Event(left(record), message.agency, 1)
+                is SmsMessage.AuthenticationFailed -> events += Event(left(record), message.agency, 2)
                 else -> Unit
             }
             var session: Session? = null
@@ -305,8 +348,7 @@ object Ledger {
             val last = op.attempts.lastOrNull()
             if (last == null) {
                 when (val auth = auths.lastOrNull()?.let(::authStatus)) {
-                    is AuthStatus.Rejected -> return OperationState.NotExecuted(
-                        if (auth.wrongPin) NotExecutedReason.WRONG_PIN else NotExecutedReason.AUTHENTICATION, auth.reason)
+                    is AuthStatus.Rejected -> return OperationState.NotExecuted(auth.stops, auth.reason)
                     is AuthStatus.Failed -> return OperationState.NotExecuted(NotExecutedReason.AUTHENTICATION, auth.detail)
                     is AuthStatus.NotSent -> return OperationState.NotExecuted(NotExecutedReason.SEND_FAILED, auth.reason)
                     AuthStatus.Busy -> if (auths.count { authStatus(it) == AuthStatus.Busy } >= 2) return OperationState.NotExecuted(NotExecutedReason.BUSY)
@@ -330,8 +372,7 @@ object Ledger {
                 if (!isQuery(request) || op.attempts.size >= 2) return OperationState.NotExecuted(NotExecutedReason.BUSY)
                 // The single retry may need a new `40`; if that one fails, or the key was rejected meanwhile, stop.
                 when (val auth = auths.lastOrNull { it.createdAt >= last.sentAt }?.let(::authStatus)) {
-                    is AuthStatus.Rejected -> return OperationState.NotExecuted(
-                        if (auth.wrongPin) NotExecutedReason.WRONG_PIN else NotExecutedReason.AUTHENTICATION, auth.reason)
+                    is AuthStatus.Rejected -> return OperationState.NotExecuted(auth.stops, auth.reason)
                     is AuthStatus.Failed -> return OperationState.NotExecuted(NotExecutedReason.AUTHENTICATION, auth.detail)
                     is AuthStatus.NotSent -> return OperationState.NotExecuted(NotExecutedReason.SEND_FAILED, auth.reason)
                     AuthStatus.Busy -> return OperationState.NotExecuted(NotExecutedReason.BUSY)
@@ -382,8 +423,15 @@ object Ledger {
                 }
             ).filter { it > now }.minOrNull()
 
-        /** For QR receipts, an operation whose transaction id agrees with "Id Compra" goes first. */
+        /**
+         * Among the operations a receipt can answer, the one it names goes first: for a transfer, the one sent from the
+         * card the receipt gives as "Ordenante"; for a QR payment, the one whose transaction id agrees with "Id Compra".
+         */
         private fun preferred(request: UssdRequest, message: SmsMessage): Boolean {
+            if (request is Transfer && message is SmsMessage.TransferSent) {
+                val source = request.source
+                return message.sourceMask != null && source is Source.Card && Cards.matches(message.sourceMask, source.number)
+            }
             val (purchase, id) = when {
                 request is QrPay && message is SmsMessage.PaymentCompleted -> message.purchaseId to request.payment.transactionId
                 request is ClassicQrPay && message is SmsMessage.WalletPaymentCompleted -> message.purchaseId to request.payment.transactionId
@@ -408,6 +456,7 @@ object Ledger {
         is SmsMessage.WalletPaymentCompleted -> request is ClassicQrPay && request.amount == message.amount
         is SmsMessage.Registration -> (request is BankRegistration || request is MiTransferRegistration) &&
             (message.agency == null || message.agency == request.agency)
+        is SmsMessage.CardAssociated -> request is CardAssociation && request.bank == message.bank
         // Money waits for a receipt or a refusal it can be sure of: unknown wording never closes it.
         is SmsMessage.WalletText -> request is MiTransferRequest && request !is MiTransferAuthenticate &&
             request !is ClassicTransfer && request !is ClassicQrPay

@@ -94,6 +94,7 @@ internal object Notices {
             ?: "la red no aceptó la solicitud"
         NotExecutedReason.AUTHENTICATION -> "no se pudo autenticar con el banco"
         NotExecutedReason.WRONG_PIN -> "clave incorrecta"
+        NotExecutedReason.NO_BANKING -> "esta línea no tiene banca móvil en el banco"
     }
 
     fun describe(request: UssdRequest, contacts: List<Contact>): String = when (request) {

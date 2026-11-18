@@ -45,7 +45,8 @@ data class PendingKey(val at: Instant, val sms: Long? = null)
 /**
  * User settings plus the engine's own facts: when each key (a bank's, MiTransfer's PIN) was saved, the keys waiting
  * to be saved ([pendingKeys]), how the inbox was last read in full ([inboxVersion]: 0 never, 1 PAGOxMOVIL only, 2 with
- * BANDEC's alerts), the last backup.
+ * BANDEC's alerts, 3 with the SIM of each SMS), the last backup, and the SIMs each bank or MiTransfer answered on
+ * ([lines]: subscription ids, the last one it answered on last), where the line is registered with it.
  */
 data class Preferences(
     val settings: Settings = Settings(),
@@ -53,6 +54,7 @@ data class Preferences(
     val inboxVersion: Int = 0,
     val lastBackup: Instant? = null,
     val pendingKeys: Map<Agency, PendingKey> = emptyMap(),
+    val lines: Map<Agency, List<Int>> = emptyMap(),
 )
 
 data class Snapshot(
@@ -107,8 +109,8 @@ class RoomStore(private val dao: NeoDao) : Store {
     override suspend fun savePreferences(preferences: Preferences) {
         val rows = preferences.toRows()
         dao.upsertSettings(rows)
-        dao.deleteSettings(AGENCIES.flatMap { listOf(KEY_SAVED + it.storageName, KEY_PENDING + it.storageName) } + INBOX_IMPORTED -
-            rows.map { it.key }.toSet())
+        dao.deleteSettings(AGENCIES.flatMap { listOf(KEY_SAVED + it.storageName, KEY_PENDING + it.storageName, LINES + it.storageName) } +
+            INBOX_IMPORTED - rows.map { it.key }.toSet())
     }
 }
 
@@ -142,6 +144,8 @@ private const val RESULT_NOTIFICATIONS = "notify.results"
 private const val KEY_SAVED = "key.saved."
 /** `<at millis>` or `<at millis>:<sms id>` ([PendingKey]). */
 private const val KEY_PENDING = "key.pending."
+/** Subscription ids separated by commas ([Preferences.lines]). */
+private const val LINES = "lines."
 /** Before [INBOX_VERSION]: `true` meant version 1. */
 private const val INBOX_IMPORTED = "inbox.imported"
 private const val INBOX_VERSION = "inbox.version"
@@ -156,7 +160,8 @@ internal fun Preferences.toRows(): List<SettingEntity> = listOf(
     keySavedAt.map { (agency, at) -> SettingEntity(KEY_SAVED + agency.storageName, at.toEpochMilli().toString()) } +
     pendingKeys.map { (agency, key) ->
         SettingEntity(KEY_PENDING + agency.storageName, listOfNotNull(key.at.toEpochMilli(), key.sms).joinToString(":"))
-    }
+    } +
+    lines.filterValues { it.isNotEmpty() }.map { (agency, sims) -> SettingEntity(LINES + agency.storageName, sims.joinToString(",")) }
 
 internal fun List<SettingEntity>.toPreferences(): Preferences {
     val values = associate { it.key to it.value }
@@ -172,6 +177,7 @@ internal fun List<SettingEntity>.toPreferences(): Preferences {
         AGENCIES.mapNotNull { agency ->
             values[KEY_PENDING + agency.storageName]?.split(':')?.let { agency to PendingKey(Instant.ofEpochMilli(it[0].toLong()), it.getOrNull(1)?.toLong()) }
         }.toMap(),
+        AGENCIES.mapNotNull { agency -> values[LINES + agency.storageName]?.let { agency to it.split(',').map(String::toInt) } }.toMap(),
     )
 }
 

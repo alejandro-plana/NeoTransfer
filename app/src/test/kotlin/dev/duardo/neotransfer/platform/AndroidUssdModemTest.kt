@@ -43,4 +43,16 @@ class AndroidUssdModemTest {
         service(ServiceState.STATE_IN_SERVICE)
         assertNull(modem.unavailable())
     }
+
+    @Test fun `a request leaves through the SIM of calls when its bank answered on it, otherwise through the newest SIM it answered on`() {
+        val inPhone = setOf(3, 5)::contains
+        val asks = -1 // the phone asks which SIM on every call
+        assertEquals(3, chooseSim(listOf(3), asks, inPhone))
+        assertEquals(3, chooseSim(listOf(3), calls = 5, inPhone)) // the SIM of calls is not the one the bank knows
+        assertEquals(5, chooseSim(listOf(5, 3), calls = 5, inPhone)) // it knows both: the SIM of calls
+        assertEquals(3, chooseSim(listOf(5, 3), asks, inPhone)) // the last it answered on
+        assertEquals(5, chooseSim(listOf(5, 2), asks, inPhone)) // SIM 2 left the phone
+        assertEquals(5, chooseSim(listOf(2), calls = 5, inPhone))
+        assertEquals(asks, chooseSim(emptyList(), asks, inPhone)) // nothing known: the system's own choice
+    }
 }

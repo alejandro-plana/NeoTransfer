@@ -14,6 +14,7 @@ import dev.duardo.neotransfer.core.ledger.Operation
 import dev.duardo.neotransfer.core.ledger.OperationState
 import dev.duardo.neotransfer.core.ledger.SharedKind
 import dev.duardo.neotransfer.core.ledger.SharedStatus
+import dev.duardo.neotransfer.core.model.Agency
 import dev.duardo.neotransfer.core.model.Bank
 import dev.duardo.neotransfer.core.model.Contact
 import dev.duardo.neotransfer.core.model.ContactRecord
@@ -33,10 +34,13 @@ import dev.duardo.neotransfer.core.protocol.CubacelTransfer
 import dev.duardo.neotransfer.core.protocol.MiTransferRegistration
 import dev.duardo.neotransfer.core.protocol.ParameterCodec
 import dev.duardo.neotransfer.core.protocol.PinChange
+import dev.duardo.neotransfer.core.protocol.Source
 import dev.duardo.neotransfer.core.protocol.Transfer
 import dev.duardo.neotransfer.core.protocol.UssdCommand
 import dev.duardo.neotransfer.core.protocol.UssdTransport
 import dev.duardo.neotransfer.data.ClassicCard
+import dev.duardo.neotransfer.data.Preferences
+import dev.duardo.neotransfer.data.StoredSms
 import dev.duardo.neotransfer.data.WalletCard
 import dev.duardo.neotransfer.ui.model.BalanceUi
 import dev.duardo.neotransfer.ui.model.Bank as Issuer
@@ -317,6 +321,103 @@ class AppControllerTest {
         val id = queued(rig.controller.submit(Transfer(Bank.BANDEC, rig.controller.sourceFor(bandec.card.number), friend, Money.cup("300"))))
         wait(Duration.ofSeconds(5))
         assertEquals(OperationState.NotExecuted(NotExecutedReason.SEND_FAILED, "Falta el permiso de llamadas"), rig.state(id))
+    }
+
+    @Test fun `each bank's requests leave through the SIM it answered on, read from the inbox`() = runTest {
+        val store = MemoryStore()
+        val inbox = FakeInbox()
+        val vault = FakeVault()
+        val earlier = now() - Duration.ofDays(2)
+        // Two SIMs. The line is registered with BPA on SIM 3; SIM 5 only got a refusal and a credit.
+        inbox.deliver(BankSms.authenticatedBpa(), earlier, earlier, sim = 3)
+        inbox.deliver(BankSms.noBanking(), earlier.plusSeconds(60), earlier.plusSeconds(60), sim = 5)
+        inbox.deliver(BankSms.received(bpa.card.number, "50.00", "AY000OLD"), earlier.plusSeconds(120), earlier.plusSeconds(120), sim = 5)
+        val rig = rig(store, inbox, vault)
+        rig.ready(bpa, bandec)
+        rig.controller.onForeground()
+        queued(rig.controller.refreshBalance(bpa.card.number))
+        wait(Duration.ofSeconds(10))
+        assertEquals(listOf(40, 46), rig.modem.services)
+        assertEquals(listOf(listOf(3), listOf(3)), rig.modem.lines)
+        // A transfer is dialed through it too.
+        queued(rig.controller.submit(Transfer(Bank.BPA, rig.controller.sourceFor(bpa.card.number), friend, Money.cup("300"))))
+        wait(Duration.ofSeconds(5))
+        assertEquals(45, rig.modem.dialed.single().service)
+        assertEquals(listOf(3), rig.modem.lines.last())
+        // BANDEC answered nowhere yet, and Cubacel is no bank: the SIM of calls.
+        val balance = queued(rig.controller.refreshBalance(bandec.card.number))
+        queued(rig.controller.submit(CubacelQuery(CubacelQueryKind.BALANCE)))
+        wait(Duration.ofMinutes(1))
+        assertEquals(listOf(40, 46, 40, 46, null), rig.modem.services)
+        assertEquals(List(3) { emptyList<Int>() }, rig.modem.lines.takeLast(3))
+        // Its answer arrives on SIM 5: BANDEC's from now on, for the next process too.
+        inbox.deliver(BankSms.balanceBandec(bandec.card.number, "10.00"), now() - Duration.ofSeconds(3), now(), sim = 5)
+        rig.controller.onBankSms().join()
+        assertIs<OperationState.Confirmed>(rig.state(balance))
+        assertEquals(mapOf<Agency, List<Int>>(Bank.BPA to listOf(3), Bank.BANDEC to listOf(5)), store.preferences.lines)
+        rig.controller.close()
+        val second = rig(store, inbox, vault)
+        second.controller.unlock(second.controller.unlockCipher())
+        queued(second.controller.refreshBalance(bandec.card.number))
+        wait(Duration.ofSeconds(10))
+        assertEquals(listOf(5), second.modem.lines.last())
+    }
+
+    @Test fun `a line without mobile banking is told, and the next request leaves through the SIM that has it`() = runTest {
+        val rig = rig()
+        rig.ready(bpa)
+        rig.controller.onForeground()
+        val first = queued(rig.controller.refreshBalance(bpa.card.number))
+        wait(Duration.ofSeconds(10))
+        assertEquals(List(2) { emptyList<Int>() }, rig.modem.lines.toList()) // nothing known yet: the SIM of calls
+        rig.inbox.deliver(BankSms.noBanking(), now() - Duration.ofSeconds(2), now(), sim = 5)
+        rig.controller.onBankSms().join()
+        assertEquals("Esta línea no tiene banca móvil en el banco", assertIs<OperationState.Rejected>(rig.state(first)).reason)
+        // Transfermóvil authenticates through the other SIM: its SMS shows where the line is.
+        wait(Duration.ofMinutes(5))
+        rig.inbox.deliver(BankSms.authenticatedBpa(), now() - Duration.ofSeconds(2), now(), sim = 3)
+        rig.controller.onBankSms().join()
+        val second = queued(rig.controller.refreshBalance(bpa.card.number))
+        wait(Duration.ofSeconds(10))
+        assertEquals(listOf(3), rig.modem.lines.last())
+        deliver(rig, BankSms.balanceBpa("845.10"), late = Duration.ofSeconds(2))
+        rig.controller.onBankSms().join()
+        assertIs<OperationState.Confirmed>(rig.state(second))
+    }
+
+    @Test fun `a BPA line with more cards than the wallet sends its card explicitly`() = runTest {
+        val rig = rig()
+        rig.ready(bpa)
+        assertEquals(Source.Default(), rig.controller.sourceFor(bpa.card.number))
+        // The receipt of a transfer made from another app names another card of the line as the one that paid.
+        deliver(rig, BankSms.transferDoneBpa("9224000000000009", friend, "50.00", "BR000OTHER"))
+        rig.controller.onBankSms().join()
+        assertEquals(Source.Card(bpa.card.number), rig.controller.sourceFor(bpa.card.number))
+        val id = queued(rig.controller.refreshBalance(bpa.card.number))
+        wait(Duration.ofSeconds(10))
+        assertEquals(listOf(40, 46), rig.modem.services)
+        assertTrue(rig.modem.sent.last().carries(46, "0", bpa.card.number))
+        assertTrue(rig.book().wallet.single().refreshing)
+        deliver(rig, BankSms.balanceBpa("845.10"), late = Duration.ofSeconds(2))
+        rig.controller.onBankSms().join()
+        assertIs<OperationState.Confirmed>(rig.state(id))
+        assertEquals(Money.cup("845.10"), rig.balance(bpa))
+    }
+
+    @Test fun `an update reads the inbox again, silently, for the SIM of the SMS it already had`() = runTest {
+        val store = MemoryStore()
+        val inbox = FakeInbox()
+        val earlier = now() - Duration.ofDays(2)
+        val id = inbox.deliver(BankSms.authenticatedBpa(), earlier, earlier, sim = 3)
+        // As the version before left it: the SMS ingested, without its SIM.
+        store.sms[id] = StoredSms(id, earlier, earlier, BankSms.authenticatedBpa())
+        store.preferences = Preferences(inboxVersion = 2)
+        val rig = rig(store, inbox)
+        runCurrent()
+        assertEquals(listOf(0L), inbox.reads.toList())
+        assertEquals(mapOf<Agency, List<Int>>(Bank.BPA to listOf(3)), store.preferences.lines)
+        assertEquals(3, store.preferences.inboxVersion)
+        assertTrue(rig.notifier.posted.isEmpty())
     }
 
     @Test fun `the process dies with a 40 in the air - the next start waits out the acknowledgement and resumes the queue`() = runTest {

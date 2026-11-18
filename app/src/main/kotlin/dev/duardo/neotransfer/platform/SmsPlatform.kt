@@ -19,13 +19,17 @@ class AndroidSmsInbox(context: Context) : SmsInbox {
     private val resolver = context.applicationContext.contentResolver
 
     override fun read(fromId: Long): List<InboxSms> = buildList {
-        val projection = arrayOf(Telephony.Sms._ID, Telephony.Sms.DATE, Telephony.Sms.DATE_SENT, Telephony.Sms.BODY, Telephony.Sms.ADDRESS)
+        val projection = arrayOf(Telephony.Sms._ID, Telephony.Sms.DATE, Telephony.Sms.DATE_SENT, Telephony.Sms.BODY, Telephony.Sms.ADDRESS,
+            Telephony.Sms.SUBSCRIPTION_ID)
         val senders = SmsRecord.SENDERS.joinToString { "?" }
         val selection = "${Telephony.Sms.ADDRESS} COLLATE NOCASE IN ($senders) AND ${Telephony.Sms._ID} >= ?"
         resolver.query(Telephony.Sms.Inbox.CONTENT_URI, projection, selection, (SmsRecord.SENDERS + fromId.toString()).toTypedArray(), "${Telephony.Sms._ID} ASC")
             ?.use { cursor ->
                 while (cursor.moveToNext()) {
-                    add(InboxSms(cursor.getLong(0), cursor.getLong(1), cursor.getLong(2), cursor.getString(3).orEmpty(), cursor.getString(4).orEmpty()))
+                    // `sub_id` is negative when the phone did not note the SIM.
+                    val subscription = if (cursor.isNull(5)) null else cursor.getInt(5).takeIf { it >= 0 }
+                    add(InboxSms(cursor.getLong(0), cursor.getLong(1), cursor.getLong(2), cursor.getString(3).orEmpty(), cursor.getString(4).orEmpty(),
+                        subscription))
                 }
             }
     }

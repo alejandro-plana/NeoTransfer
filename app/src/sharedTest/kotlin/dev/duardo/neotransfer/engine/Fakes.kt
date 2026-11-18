@@ -30,8 +30,12 @@ class FakeModem(var latency: Long = 2_000) : UssdModem {
     /** Service numbers handed to the modem, in order (null for Cubacel codes). */
     val services: List<Int?> get() = sent.map { it.service }
 
-    override suspend fun request(command: UssdCommand): UssdReply {
+    /** The SIMs each request or dial was handed, in the order they came. */
+    val lines = CopyOnWriteArrayList<List<Int>>()
+
+    override suspend fun request(command: UssdCommand, lines: List<Int>): UssdReply {
         sent += command
+        this.lines.add(lines)
         delay(latency)
         return answer(command) ?: awaitCancellation()
     }
@@ -39,8 +43,9 @@ class FakeModem(var latency: Long = 2_000) : UssdModem {
     /** What every dial answers: why nothing was dialed, or null. */
     var dialFailure: String? = null
 
-    override fun dial(command: UssdCommand): String? {
+    override fun dial(command: UssdCommand, lines: List<Int>): String? {
         dialed += command
+        this.lines.add(lines)
         return dialFailure
     }
 }
@@ -52,9 +57,10 @@ class FakeInbox : SmsInbox {
     @Volatile var granted = true
     private var nextId = 100L
 
+    /** [sim]: the SIM it arrives on; null as on a phone that does not note it. */
     @Synchronized
-    fun deliver(body: String, sentAt: Instant, receivedAt: Instant): Long =
-        nextId++.also { rows += InboxSms(it, receivedAt.toEpochMilli(), sentAt.toEpochMilli(), body) }
+    fun deliver(body: String, sentAt: Instant, receivedAt: Instant, sim: Int? = null): Long =
+        nextId++.also { rows += InboxSms(it, receivedAt.toEpochMilli(), sentAt.toEpochMilli(), body, subscription = sim) }
 
     override fun read(fromId: Long): List<InboxSms> {
         if (!granted) throw SecurityException("READ_SMS")
@@ -221,6 +227,9 @@ class Rig(
 /** Synthetic PAGOxMOVIL bodies with the real templates; numbers and references are made up. */
 object BankSms {
     fun busy() = "Usted tiene una solicitud en proceso, en breve recibira respuesta y podra realizar otra operacion. "
+    fun authenticatedBpa() = "Usted se ha autenticado en la plataforma de pagos moviles, en el Banco Popular de Ahorro, puede comenzar a utilizar nuestros servicios de pagos a traves del movil"
+    /** BPA's answer to a `40` from a line it does not know. */
+    fun noBanking() = "Banco Popular de Ahorro: CLIENTE SIN SERVICIO DE BANCA MOVIL Error de autenticacion, intente nuevamente. Si persiste el problema, contacte con su proveedor de servicios."
     fun balanceBpa(value: String) = "Banco Popular de Ahorro:  La consulta de saldo fue completada. \n Saldo Disponible: CR $value CUP"
     fun balanceBandec(card: String, available: String) =
         "Banco Bandec La consulta de saldo fue completada. \n Cuenta;Saldo Contable;Saldo Disponible;Moneda \n${card.take(6)}XXXXXX${card.takeLast(4)}; CR $available ; CR $available ;CUP | \n"
@@ -229,6 +238,9 @@ object BankSms {
     fun rejectedTransfer() = "Fallo la transferencia. Banco Bandec: LA CUENTA NO ESTA ASOCIADA A UNA TARJETA MAGNETICA"
     fun transferDone(to: String, amount: String, ref: String = "KW000TEST3") = "Banco Bandec:  La Transferencia fue completada. \n Fecha: 15/10/2026 \n " +
         "Beneficiario: ${to.take(4)}XXXXXXXX${to.takeLast(4)} \n Ordenante: CUP \n Monto: $amount CUP \n Nro. Transaccion: $ref \n Saldo restante: CR 700.00 CUP "
+    /** BPA's receipt of a transfer whose origin was given as a card: it names it as "Ordenante". */
+    fun transferDoneBpa(from: String, to: String, amount: String, ref: String) = "Banco Popular de Ahorro:  La Transferencia fue completada. \n Fecha: 15/10/2026 \n " +
+        "Beneficiario: ${to.take(4)}XXXXXXXX${to.takeLast(4)} \n Ordenante: ${from.take(4)}XXXXXXXX${from.takeLast(4)} \n Monto: $amount CUP \n Nro. Transaccion: $ref \n Saldo restante: CR 650.00 CUP "
     fun registration(key: String) =
         "Banco Bandec:  La operacion de registro fue completada. Bienvenido a Transfermovil.Clave de Autenticacion: $key Guarde esta clave."
 }

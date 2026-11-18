@@ -76,6 +76,12 @@ data class Movement(
 }
 
 /**
+ * The cards [bank]'s receipts name as the one that paid, as they wrote them (masks, or whole numbers): what
+ * [Source.forCard] takes to tell whether the line holds more cards than the wallet.
+ */
+fun List<Movement>.paying(bank: Bank): List<String> = filter { it.bank == bank && it.direction != Direction.IN }.mapNotNull { it.cardSeen }
+
+/**
  * Balance of one own card: last observed balance plus later movements attributed to it.
  * [value] is null until a balance has been observed. [observedAt] is that observation;
  * [updatedAt] the last thing applied (a later credit, for instance).
@@ -89,6 +95,28 @@ internal class Activity(
     private val cards: List<OwnCard>,
 ) {
     private class Entry(val movement: Movement, val order: Long)
+
+    /**
+     * A BPA receipt names as paying a card the wallet does not hold: the line has more cards than the wallet, and what
+     * names none (a balance, a service receipt, the default account) may be any of them. Read before any movement is built.
+     */
+    private val moreBpaCards: Boolean = sms.any { record ->
+        val mask = (record.message as? SmsMessage.TransferSent)?.takeIf { it.bank == Bank.BPA }?.sourceMask
+        mask != null && cards.none { it.bank == Bank.BPA && Cards.matches(mask, it.number) }
+    }
+
+    /**
+     * Last operations asked for one card list what is its: each reference they name, as a debit or a credit, goes to
+     * that card, whatever a receipt or an earlier answer left without one.
+     */
+    private val stated: Map<Pair<String, Boolean>, String> = buildMap {
+        for (record in sms) {
+            val message = record.message as? SmsMessage.History ?: continue
+            val source = (operationOf[record.id]?.let(operations::get)?.request as? HistoryQuery)?.source as? Source.Card ?: continue
+            val card = own(source.number) ?: continue
+            message.entries.forEach { row -> row.reference?.let { put(it to row.credit, card) } }
+        }
+    }
 
     private val receipts: List<Entry> = sms.filter { it.message is Receipt }
         .groupBy { (it.message as Receipt).reference }.values.mapNotNull(::movement)
@@ -113,8 +141,10 @@ internal class Activity(
         val at = primary.sentAt
         val movement = when (val m = primary.message) {
             is SmsMessage.TransferSent -> {
+                // The receipt masks the beneficiary; the app's own transfer knows it whole.
                 val destination = messages.filterIsInstance<SmsMessage.TransferNotice>().firstOrNull()?.account
                     ?: messages.filterIsInstance<SmsMessage.TransferReceived>().firstOrNull()?.account
+                    ?: (request as? Transfer)?.destination
                 val credit = own(destination)
                 Movement("ref:${m.reference}", MovementKind.TRANSFER, null, if (credit != null) Direction.BETWEEN_OWN else Direction.OUT,
                     m.amount, at, m.bank, debitCard(m.bank, source, m.sourceMask, m.amount.currency, at), credit,
@@ -143,7 +173,14 @@ internal class Activity(
             }
             else -> return null
         }
-        return Entry(movement, primary.id)
+        return Entry(movement.withStated(), primary.id)
+    }
+
+    private fun Movement.withStated(): Movement {
+        val ref = reference ?: return this
+        val debit = debitCard ?: stated[ref to false].takeIf { direction != Direction.IN }
+        val credit = creditCard ?: stated[ref to true].takeIf { direction == Direction.IN }
+        return copy(debitCard = debit, creditCard = credit, bank = bank ?: cards.firstOrNull { it.number == credit }?.bank)
     }
 
     /**
@@ -169,7 +206,8 @@ internal class Activity(
                     "day:$key:$occurrence"
                 } ?: continue
                 if (id in found || row.reference?.let(referenced::contains) == true) continue
-                val card = if (source is Source.Card) own(source.number) else defaultCard(message.bank, row.amount.currency, record.sentAt)
+                val card = row.reference?.let { stated[it to row.credit] }
+                    ?: if (source is Source.Card) own(source.number) else defaultCard(message.bank, row.amount.currency, record.sentAt)
                 found[id] = Entry(Movement(id, if (row.description.contains("transferencia", true)) MovementKind.TRANSFER else MovementKind.OTHER,
                     null, if (row.credit) Direction.IN else Direction.OUT, row.amount, row.date.atStartOfDay(CUBA).toInstant(), message.bank,
                     card.takeUnless { row.credit }, card.takeIf { row.credit }, null, row.reference, null, null,
@@ -209,6 +247,7 @@ internal class Activity(
 
     /** BANDEC names the session card in its authentication SMS; with that, several cards stay unambiguous. */
     private fun defaultCard(bank: Bank, currency: Currency, at: Instant): String? {
+        if (bank == Bank.BPA && moreBpaCards) return null
         val candidates = cards.filter { it.bank == bank && it.currency == currency }
         if (bank != Bank.BANDEC) return candidates.singleOrNull()?.number
         val active = sms.lastOrNull { it.sentAt <= at && (it.message as? SmsMessage.Authenticated)?.let { a -> a.agency == bank && a.cardMask != null } == true }

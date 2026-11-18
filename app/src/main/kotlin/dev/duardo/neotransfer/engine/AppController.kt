@@ -16,6 +16,7 @@ import dev.duardo.neotransfer.core.ledger.OperationState
 import dev.duardo.neotransfer.core.ledger.OperationStatus
 import dev.duardo.neotransfer.core.ledger.Session
 import dev.duardo.neotransfer.core.ledger.isPending
+import dev.duardo.neotransfer.core.ledger.paying
 import dev.duardo.neotransfer.core.model.Agency
 import dev.duardo.neotransfer.core.model.Bank
 import dev.duardo.neotransfer.core.model.Cards
@@ -60,6 +61,7 @@ import dev.duardo.neotransfer.core.qr.QrPayment
 import dev.duardo.neotransfer.core.sms.SmsMessage
 import dev.duardo.neotransfer.core.sms.SmsParser
 import dev.duardo.neotransfer.core.sms.SmsRecord
+import dev.duardo.neotransfer.core.sms.registeredWith
 import dev.duardo.neotransfer.data.ClassicCard
 import dev.duardo.neotransfer.data.PendingKey
 import dev.duardo.neotransfer.data.Preferences
@@ -788,8 +790,12 @@ class AppController(
 
     // ---- Operations ----
 
-    /** With one card of its bank the default account is enough; with several, the card goes explicitly. */
-    fun sourceFor(card: String): Source = ownCard(card).let { own -> Source.forCard(own, _cards.value.map { it.card.card }) }
+    /**
+     * With one card of its bank the default account is enough; with several, the card goes explicitly, and so it does
+     * in BPA once a receipt names another card of the line as the one that paid ([Source.forCard]).
+     */
+    fun sourceFor(card: String): Source =
+        ownCard(card).let { own -> Source.forCard(own, _cards.value.map { it.card.card }, _movements.value.paying(own.bank)) }
 
     /** Balance of an own card: the bank's `46`, or MiTransfer's for a Clásica. */
     suspend fun refreshBalance(card: String): Submission = onState {
@@ -1077,12 +1083,14 @@ class AppController(
                 operationsById[operation.id] = operation.failed("No se pudo guardar la operación", clock())
                 return
             }
+            // Through a SIM its bank answered on: the bank knows only the line registered with it.
+            val lines = request.agency?.let(preferences.lines::get).orEmpty()
             // The system dialog takes the person's answer to the bank; the SMS settles the operation.
             commands.singleOrNull()?.takeIf { it.transport == UssdTransport.DIAL }?.let { command ->
-                modem.dial(command)?.let { reason -> keep(operation.failed(reason, clock())) }
+                modem.dial(command, lines)?.let { reason -> keep(operation.failed(reason, clock())) }
                 return
             }
-            val reply = withTimeoutOrNull(Ledger.ACK_TIMEOUT.toMillis()) { exchange(commands) } ?: return
+            val reply = withTimeoutOrNull(Ledger.ACK_TIMEOUT.toMillis()) { exchange(commands, lines) } ?: return
             keep(when (reply) {
                 is UssdReply.Text -> operation.replied(reply.text, clock())
                 is UssdReply.Failure -> operation.failed(reply.reason, clock())
@@ -1094,9 +1102,9 @@ class AppController(
     }
 
     /** Several commands only for an oversized payment: each part goes after the previous one is "siendo procesada". */
-    private suspend fun exchange(commands: List<UssdCommand>): UssdReply {
+    private suspend fun exchange(commands: List<UssdCommand>, lines: List<Int>): UssdReply {
         for (command in commands) {
-            val reply = modem.request(command)
+            val reply = modem.request(command, lines)
             if (command === commands.last() || reply !is UssdReply.Text || BankResponse.parse(reply.text) != BankResponse.PROCESSING) return reply
         }
         error("Solicitud sin comandos")
@@ -1196,7 +1204,9 @@ class AppController(
         }
         val ingested = stored.map { records.getValue(it.id) }
         val announce = !full
-        preferences = preferences.copy(inboxVersion = INBOX_VERSION)
+        val lines = linesAfter(rows)
+        val learned = lines != preferences.lines
+        preferences = preferences.copy(inboxVersion = INBOX_VERSION, lines = lines)
         publish(if (announce) ingested else emptyList())
         val noted = noteKeysToSave(ingested, withKey)
         if (noted) {
@@ -1205,8 +1215,18 @@ class AppController(
             publish()
         }
         if (stored.isNotEmpty()) store.saveSms(stored)
-        if (!announce && !noted) store.savePreferences(preferences)
+        if ((!announce || learned) && !noted) store.savePreferences(preferences)
         return stored.size
+    }
+
+    /**
+     * [Preferences.lines] after the inbox [rows] just read, oldest first: the SIM of each SMS that shows the line
+     * registered with a bank or MiTransfer ([registeredWith]) becomes the newest of that one's.
+     */
+    private fun linesAfter(rows: List<InboxSms>): Map<Agency, List<Int>> = rows.fold(preferences.lines) { lines, row ->
+        val sim = row.subscription ?: return@fold lines
+        val agency = records[row.id]?.message?.registeredWith ?: return@fold lines
+        if (lines[agency]?.lastOrNull() == sim) lines else lines + (agency to lines[agency].orEmpty() - sim + sim)
     }
 
     /**
@@ -1317,8 +1337,11 @@ class AppController(
         /** Within a receiver's time limit; [onInboxChanged] catches a slower inbox write. */
         private const val INBOX_POLLS = 12
         private val INBOX_POLL_INTERVAL: Duration = Duration.ofMillis(500)
-        /** Bumped when the inbox gains a sender: the next read starts over, silently ([Preferences.inboxVersion]). */
-        private const val INBOX_VERSION = 2
+        /**
+         * Bumped when the inbox gains a sender, or something else to read from every SMS (the SIM it arrived on): the
+         * next read starts over, silently ([Preferences.inboxVersion]).
+         */
+        private const val INBOX_VERSION = 3
         private const val KEYS_LOCKED = "Vuelve a desbloquear con la huella para guardar la clave"
         /** No secure screen lock and no app code over the keys: they cannot be saved. */
         const val NO_LOCK = "Pon un bloqueo de pantalla en el teléfono para guardar la clave"

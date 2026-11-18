@@ -30,7 +30,7 @@ El libro de operaciones es una función pura: `Ledger.evaluate` (`core/src/main/
 1. **Pedir.** `AppController.submit` comprueba que el banco, o MiTransfer para la Clásica, tenga clave guardada cuando la solicitud la necesita y que no haya un pago idéntico pendiente: mismo origen, destino e importe. Si lo hay, pregunta antes («Ya enviaste… ¿Enviar otro?»); no bloquea. La operación se guarda antes de que nada pueda enviarla.
 2. **Turno.** Hay una sola solicitud USSD en curso a la vez: la siguiente sale cuando llega el acuse de la anterior, o a los 45 s sin acuse. La interfaz no se bloquea mientras tanto.
 3. **Autenticación encadenada.** Si la operación necesita sesión y no la hay para su banco, el libro crea un `40` automático (identificador `<operación>#auth<n>`, campo `unlocks`) y la operación sale justo tras su acuse, sin esperar el SMS.
-4. **Envío.** Se registra el intento (`Operation.sending`) antes de llamar al módem, y después el acuse o el fallo. Las claves solo están en memoria con la app desbloqueada: un `40` o un pago QR esperan a que se desbloquee. En modo avión o sin servicio el módem no envía nada (`platform/AndroidUssdModem.kt`): la operación queda «No se ejecutó» con «Desactiva el modo avión. No se envió nada.» o «Sin servicio. No se envió nada.», también cuando lo que no salió fue su `40`, y no se reintenta sola. Lo lee sin permisos: `Settings.Global.AIRPLANE_MODE_ON` y el estado de voz que el sistema da a un `TelephonyCallback.ServiceStateListener`.
+4. **Envío.** Se registra el intento (`Operation.sending`) antes de llamar al módem, y después el acuse o el fallo. Cada banco sale por la SIM por la que ha respondido, que la app aprende de los SMS ([protocolo](protocolo.md#12-envío-y-acuse)): en un teléfono con dos SIM, la otra línea no tiene banca móvil con ese banco. Las claves solo están en memoria con la app desbloqueada: un `40` o un pago QR esperan a que se desbloquee. En modo avión o sin servicio el módem no envía nada (`platform/AndroidUssdModem.kt`): la operación queda «No se ejecutó» con «Desactiva el modo avión. No se envió nada.» o «Sin servicio. No se envió nada.», también cuando lo que no salió fue su `40`, y no se reintenta sola. Lo lee sin permisos: `Settings.Global.AIRPLANE_MODE_ON` y el estado de voz que el sistema da a un `TelephonyCallback.ServiceStateListener`.
 5. **Resultado.** Los SMS llegan cuando llegan; cada uno vuelve a evaluar el libro. Si la app no está delante, se notifica el resultado. Nunca se reenvía dinero solo.
 
 Estados (`core/src/main/kotlin/dev/duardo/neotransfer/core/ledger/Operation.kt`) y su nombre en pantalla:
@@ -43,7 +43,7 @@ Estados (`core/src/main/kotlin/dev/duardo/neotransfer/core/ledger/Operation.kt`)
 | `Confirmed` | Confirmada | Llegó el comprobante, saldo o listado que la responde |
 | `Rejected` | Rechazada | El banco respondió «Fallo…», «Error…» o «Clave incorrecta», con su motivo |
 | `NoResponse` | Sin confirmar | 15 minutos sin SMS. Es neutro: un resultado tardío la sigue cerrando |
-| `NotExecuted` | No se ejecutó | No llegó al banco: ocupado, fallo del módem, acuse distinto o autenticación fallida. El dinero ofrece «Reintentar» de un toque, que crea una operación nueva |
+| `NotExecuted` | No se ejecutó | No llegó al banco: ocupado, fallo del módem, acuse distinto, autenticación fallida o una línea que el banco no conoce. El dinero ofrece «Reintentar» de un toque, que crea una operación nueva |
 | `Answered` | — | Consultas Cubacel y desconexión: el texto USSD es la respuesta |
 
 Una consulta nunca envía una gestión: `49`, `58`, `60`, `68`, `69` y `111` solo salen como su propia petición y el libro nunca los reenvía ([protocolo](protocolo.md#5-servicios-de-la-línea)). La app tampoco consulta por su cuenta; la persona refresca el saldo (`46`) o pide las últimas operaciones (`48`).
@@ -52,8 +52,9 @@ Una consulta nunca envía una gestión: `49`, `58`, `60`, `68`, `69` y `111` sol
 
 `Ledger.matches` decide qué SMS responde a qué operación:
 
-- Por tipo y banco y, en dinero, por importe y destino: la máscara del beneficiario en transferencias, la cuenta o la factura en servicios, el `Id Compra` en pagos QR.
-- El SMS debe recibirse después del envío, con una marca del SMSC hasta 30 s anterior y no más de 2 horas posterior. Se tolera el desorden: el resultado puede llegar antes que el SMS de autenticación.
+- Por tipo y banco y, en dinero, por importe y destino: la máscara del beneficiario en transferencias, la cuenta o la factura en servicios, el `Id Compra` en pagos QR. Entre dos transferencias iguales desde tarjetas propias distintas, el comprobante es de la que salió de la tarjeta que nombra como ordenante. Entre iguales, la más antigua, salvo una marcada más de 3 minutos antes de salir el comprobante: el aviso del banco no dura tanto, así que quedó sin confirmar y el comprobante es de la marcada después.
+- El SMS debe recibirse después del envío, y haber salido del SMSC como mucho 30 s antes y no más de 2 horas después. Se tolera el desorden: el resultado puede llegar antes que el SMS de autenticación.
+- El envío lleva la hora del teléfono y el SMS la marca del SMSC, y un teléfono con la hora puesta a mano puede ir una hora, o unos minutos, por delante o por detrás. Un SMS nunca se recibe antes de salir: la menor diferencia entre recepción y marca de los SMS recibidos en los 30 minutos anteriores, él incluido, es lo más cerca que se puede estar de la diferencia entre ambos relojes, y la marca más esa diferencia es cuándo salió según el teléfono (`Ledger`, `leftAt`). Los SMS que llegan después no la cambian. Con un solo SMS en ese rato no hay con qué distinguir un retraso de un reloj adelantado, y cuenta como recién salido. La sesión y el bloqueo por clave incorrecta usan esa misma hora.
 - Una respuesta de consulta cierra todas las copias pendientes de esa misma consulta.
 - «Solicitud en proceso» se aplica al último envío anterior a ese SMS.
 - Un rechazo que no dice qué rechaza solo se asigna si hay una única candidata.
@@ -65,9 +66,9 @@ Los comprobantes sin operación propia (hechos desde Transfermóvil, por ejemplo
 
 `Activity` (`core/src/main/kotlin/dev/duardo/neotransfer/core/ledger/Activity.kt`) arma los movimientos:
 
-- Uno por referencia bancaria, a partir de comprobantes de transferencia, pago QR, servicio o transferencia recibida.
-- Las filas de «Últimas operaciones» completan lo que ningún comprobante contó: un SMS perdido, compras con la tarjeta, cajeros.
-- La atribución a tarjetas se calcula cada vez y no se guarda: añadir una tarjeta después reasigna lo que le corresponde. Un débito con cuenta predeterminada se atribuye si solo una tarjeta de ese banco y moneda puede ser; en BANDEC ayuda la tarjeta que nombra el SMS de autenticación.
+- Uno por referencia bancaria, a partir de comprobantes de transferencia, pago QR, servicio o transferencia recibida. El comprobante enmascara al beneficiario; en una transferencia de la app, el destino completo sale de la operación, y si es una tarjeta propia, el movimiento es entre tarjetas propias y le suma.
+- Las filas de «Últimas operaciones» completan lo que ningún comprobante contó: un SMS perdido, compras con la tarjeta, cajeros. Pedidas por la app para una tarjeta concreta, además dicen de quién es cada referencia que listan: ese débito o crédito es de esa tarjeta, aunque su comprobante o una respuesta anterior no nombraran ninguna.
+- La atribución a tarjetas se calcula cada vez y no se guarda: añadir una tarjeta después reasigna lo que le corresponde. Un débito con cuenta predeterminada se atribuye si solo una tarjeta de ese banco y moneda puede ser; en BANDEC ayuda la tarjeta que nombra el SMS de autenticación. En BPA deja de atribuirse cuando algún comprobante nombra como ordenante una tarjeta que la cartera no tiene: la línea opera más tarjetas que la cartera, y desde entonces la app envía la suya explícita ([protocolo](protocolo.md#41-origen-y-moneda)).
 - Las autenticaciones nunca aparecen como movimientos.
 
 Al instalar, la app importa todos los SMS del banco de la bandeja sin notificar; después lee de forma incremental desde el último `_id`, nunca la bandeja entera por cada SMS.
@@ -98,7 +99,7 @@ Room, base `neotransfer.db`, versión 3 (`app/src/main/kotlin/dev/duardo/neotran
 | `classic_card` | Clásicas propias, solo el número: no tienen banco y siempre son USD. La cartera las muestra tras las tarjetas de los bancos |
 | `contact` | Lo que la app añade a cada persona: tarjetas y un nombre por tarjeta («Salario»). Las de la agenda del teléfono se guardan como `phone:<lookup key>`, con una copia de su nombre y teléfonos para el respaldo; la agenda manda en nombre y teléfonos (`engine/Directory.kt`). Las que solo existen en la app guardan todo |
 | `service` | Referencias de servicios guardadas: factura, cuenta Nauta, móvil |
-| `setting` | Tema, avisos, cuándo se guardó cada clave (las de los bancos y el PIN de MiTransfer), las claves pendientes de guardar (hora y `_id` del SMS, nunca la clave), si ya se importó la bandeja y fecha del último respaldo |
+| `setting` | Tema, avisos, cuándo se guardó cada clave (las de los bancos y el PIN de MiTransfer), las claves pendientes de guardar (hora y `_id` del SMS, nunca la clave), cómo se importó la bandeja, las SIM por las que ha respondido cada banco y MiTransfer, y fecha del último respaldo |
 
 `AppController` carga todo al arrancar y mantiene la copia de trabajo en memoria; cada cambio es una escritura. La copia de seguridad de Android está desactivada (`allowBackup="false"` y `data_extraction_rules.xml` excluye todo).
 

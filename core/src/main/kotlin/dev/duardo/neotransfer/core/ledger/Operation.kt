@@ -94,6 +94,8 @@ enum class NotExecutedReason {
     AUTHENTICATION,
     /** The saved key was rejected; nothing is sent for that bank until the key is saved again. */
     WRONG_PIN,
+    /** The bank does not know the line the authentication left from: it is not registered with it, or it left through another SIM. */
+    NO_BANKING,
 }
 
 val OperationState.isPending: Boolean

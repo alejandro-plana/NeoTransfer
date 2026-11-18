@@ -70,7 +70,7 @@ class FakeBank(private val context: Context) : PhoneLine, UssdModem, SmsInbox {
 
     override fun read(fromId: Long): List<InboxSms> = synchronized(rows) { rows.filter { it.id >= fromId } }
 
-    override suspend fun request(command: UssdCommand): UssdReply {
+    override suspend fun request(command: UssdCommand, lines: List<Int>): UssdReply {
         delay(900)
         // The operation being sent right now: its own request, or the one an automatic `40` unlocks.
         val request = controller.operations.value.firstOrNull { it.state == OperationState.Sending }?.operation?.request
@@ -87,7 +87,7 @@ class FakeBank(private val context: Context) : PhoneLine, UssdModem, SmsInbox {
     }
 
     /** A dialed transfer is answered as if the person typed the bank's "1"; anything else is Cubacel's menu. */
-    override fun dial(command: UssdCommand): String? {
+    override fun dial(command: UssdCommand, lines: List<Int>): String? {
         val request = controller.operations.value.firstOrNull { it.state == OperationState.Sending }?.operation?.request
         if (request is BankRequest) {
             answer(request)?.let { body -> scope.launch { delay(2_500); deliver(body) } }

@@ -39,6 +39,10 @@ class NoticesTest {
         val refused = dev.duardo.neotransfer.core.ledger.OperationState.NotExecuted(
             dev.duardo.neotransfer.core.ledger.NotExecutedReason.REFUSED, "Formato Incorrecto, Repita su solicitud")
         assertEquals("formato Incorrecto, Repita su solicitud", Notices.notExecuted(refused))
+        // The `40` left through a SIM the bank does not know: it says which line, not that the key is wrong.
+        val noBanking = dev.duardo.neotransfer.core.ledger.OperationState.NotExecuted(
+            dev.duardo.neotransfer.core.ledger.NotExecutedReason.NO_BANKING, "Esta línea no tiene banca móvil en el banco")
+        assertEquals("esta línea no tiene banca móvil en el banco", Notices.notExecuted(noBanking))
     }
 
     @Test fun `services of the line name their bank, and the Clásica's removal is of its association`() {

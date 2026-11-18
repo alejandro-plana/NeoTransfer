@@ -27,7 +27,39 @@ class SmsTemplateTest {
         assertEquals(AuthenticationFailed(Bank.BANDEC, true, "Clave incorrecta"), parse("Banco Bandec: Clave incorrecta Error de autenticacion, intente nuevamente. Si persiste el problema, contacte con ETECSA. "))
         assertEquals(AuthenticationFailed(Bank.BPA, false, "No se pudo autenticar"), parse("Banco Popular de Ahorro: LA AUTENTICACION HA FALLADO Error de autenticacion, intente nuevamente. Si persiste el problema, contacte con ETECSA. "))
         assertEquals(AuthenticationFailed(null, false, "No se pudo autenticar"), parse("vuelva a intentarlo, si persiste el problema, contacte con ETECSA Error de autenticacion, intente nuevamente. Si persiste el problema, contacte con ETECSA. "))
+        // Seen in November 2026: a `40` sent through a SIM that is not the one registered with the bank.
+        assertEquals(AuthenticationFailed(Bank.BPA, false, "Esta línea no tiene banca móvil en el banco", noBanking = true),
+            parse("Banco Popular de Ahorro: CLIENTE SIN SERVICIO DE BANCA MOVIL Error de autenticacion, intente nuevamente. Si persiste el problema, contacte con su proveedor de servicios."))
         assertEquals(Busy, parse("Usted tiene una solicitud en proceso, en breve recibira respuesta y podra realizar otra operacion. "))
+    }
+
+    @Test fun `card association and registration answers`() {
+        // BPA's answer to a `60` that went through, seen in 2025.
+        assertEquals(CardAssociated(Bank.BPA), parse("Banco Popular de Ahorro: La asociacion de la tarjeta fue completada."))
+        assertEquals(Unrecognized, parse("La asociacion de la tarjeta fue completada."))
+        // Refusals of a `49`, seen in 2026: they close a registration, never another pending request.
+        assertEquals(Rejected(Bank.BPA, RejectedOperation.REGISTRATION, "El nombre y los apellidos no coinciden con el carné de identidad. Dirígete a la sucursal bancaria."),
+            parse("Fallo el registro. Banco Popular de Ahorro: Error en registro, Nombre y Apellidos incorrectos segun CI , por favor dirijase a la sucursal bancaria."))
+        assertEquals(Rejected(Bank.BPA, RejectedOperation.REGISTRATION, "El teléfono ya tiene una cuenta asociada."),
+            parse("Fallo el registro. Banco Popular de Ahorro: EL TELEFONO YA TIENE UNA CUENTA ASOCIADA"))
+        assertEquals(Rejected(null, RejectedOperation.REGISTRATION, "Fallo el registro."),
+            parse("Fallo el registro. vuelva a intentarlo, si persiste el problema, contacte con ETECSA"))
+        assertEquals(Rejected(MiTransfer, RejectedOperation.REGISTRATION, "Fallo el registro. Carnet de identidad no coincide con el propietario de la cuenta."),
+            parse("Fallo el registro. Monedero Mi Transfer: Carnet de identidad no coincide con el propietario de la cuenta."))
+    }
+
+    @Test fun `only an authentication or a result shows the line registered with a bank`() {
+        fun registered(body: String) = parse(body).registeredWith
+        assertEquals(Bank.BPA, registered("Usted se ha autenticado en la plataforma de pagos moviles, en el Banco Popular de Ahorro, puede comenzar a utilizar nuestros servicios de pagos a traves del movil"))
+        assertEquals(Bank.BPA, registered("Banco Popular de Ahorro:  La consulta de saldo fue completada. \n Saldo Disponible: CR 845.10 CUP"))
+        assertEquals(Bank.BANDEC, registered("Banco Bandec:  La Transferencia fue completada. \n Fecha: 12/10/2026 \n Beneficiario: 9204XXXXXXXX0002 \n Ordenante: CUP \n Monto: 300.00 CUP \n Nro. Transaccion: KW000TEST3"))
+        assertEquals(Bank.BPA, registered("Banco Popular de Ahorro: La asociacion de la tarjeta fue completada."))
+        assertEquals(MiTransfer, registered("Monedero Mi Transfer: Usted se ha autenticado en la plataforma de pagos moviles."))
+        // A refusal also reaches a line the bank does not know; a credit or a copy, the phone the transfer notifies.
+        assertNull(registered("Banco Popular de Ahorro: CLIENTE SIN SERVICIO DE BANCA MOVIL Error de autenticacion, intente nuevamente."))
+        assertNull(registered("Fallo el registro. Banco Popular de Ahorro: EL TELEFONO YA TIENE UNA CUENTA ASOCIADA"))
+        assertNull(registered("El titular del telefono 5350000001 le ha realizado una transferencia a la cuenta 9204000000000001 de 50.00 CUP. Nro. Transaccion BR000TEST6"))
+        assertNull(registered("Se ha realizado una transferencia a la cuenta 9204000000000002 de 300.00 CUP. Nro. Transaccion KW000TEST3. Fecha: 12/10/2026."))
     }
 
     @Test fun balances() {

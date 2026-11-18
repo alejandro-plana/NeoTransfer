@@ -2,6 +2,7 @@ package dev.duardo.neotransfer.core.sms
 
 import dev.duardo.neotransfer.core.model.Agency
 import dev.duardo.neotransfer.core.model.Bank
+import dev.duardo.neotransfer.core.model.MiTransfer
 import dev.duardo.neotransfer.core.model.Money
 import java.time.Instant
 import java.time.LocalDate
@@ -16,8 +17,11 @@ sealed interface SmsMessage {
     /** "Usted se ha autenticado…"; BANDEC names the card the session is on. */
     data class Authenticated(val agency: Agency, val cardMask: String?) : SmsMessage
 
-    /** Authentication refused. [wrongPin] only for an explicit "Clave incorrecta". */
-    data class AuthenticationFailed(val agency: Agency?, val wrongPin: Boolean, val reason: String) : SmsMessage
+    /**
+     * Authentication refused. [wrongPin] only for an explicit "Clave incorrecta"; [noBanking] for "CLIENTE SIN SERVICIO DE
+     * BANCA MOVIL": the line that asked is not registered with that bank (another SIM of the phone may be).
+     */
+    data class AuthenticationFailed(val agency: Agency?, val wrongPin: Boolean, val reason: String, val noBanking: Boolean = false) : SmsMessage
 
     /** "Usted tiene una solicitud en proceso…": the last request sent was not executed. */
     data object Busy : SmsMessage
@@ -75,6 +79,9 @@ sealed interface SmsMessage {
      */
     data class Registration(val agency: Agency?, val key: ReceivedKey?) : SmsMessage
 
+    /** "La asociacion de la tarjeta fue completada": the bank took a card association (`60`). It does not name the card. */
+    data class CardAssociated(val bank: Bank) : SmsMessage
+
     /** MiTransfer's transfer receipt (`Monedero Mi Transfer: La Transferencia fue completada…`): the beneficiary in full. */
     data class WalletTransferSent(val beneficiary: String, override val amount: Money, override val reference: String) : Receipt
 
@@ -96,6 +103,25 @@ sealed interface SmsMessage {
 
     data object Unrecognized : SmsMessage
 }
+
+/**
+ * The bank or MiTransfer this SMS shows the line it arrived on registered with: it authenticated there, or it is the
+ * result of an operation made from it. Refusals and copies show nothing: they also reach a line that is not registered,
+ * or the phone a transfer notifies.
+ */
+val SmsMessage.registeredWith: Agency?
+    get() = when (this) {
+        is SmsMessage.Authenticated -> agency
+        is SmsMessage.Registration -> agency
+        is SmsMessage.Balance -> bank
+        is SmsMessage.History -> bank
+        is SmsMessage.TransferSent -> bank
+        is SmsMessage.PaymentCompleted -> bank
+        is SmsMessage.ServicePaid -> bank
+        is SmsMessage.CardAssociated -> bank
+        is SmsMessage.WalletTransferSent, is SmsMessage.WalletPaymentCompleted -> MiTransfer
+        else -> null
+    }
 
 /** Messages that identify a bank transaction by its reference. */
 sealed interface Receipt : SmsMessage {

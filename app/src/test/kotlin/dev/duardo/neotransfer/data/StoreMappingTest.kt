@@ -47,7 +47,8 @@ class StoreMappingTest {
     @Test fun preferences() {
         val preferences = Preferences(Settings(Theme.DARK, creditNotifications = false, resultNotifications = true),
             mapOf(Bank.BANDEC to at, MiTransfer to at), inboxVersion = 2, lastBackup = at,
-            pendingKeys = mapOf(Bank.BPA to PendingKey(at, 42), MiTransfer to PendingKey(at)))
+            pendingKeys = mapOf(Bank.BPA to PendingKey(at, 42), MiTransfer to PendingKey(at)),
+            lines = mapOf(Bank.BPA to listOf(2, 3), MiTransfer to listOf(1)))
         val millis = Instant.ofEpochMilli(at.toEpochMilli())
         assertEquals(
             preferences.copy(keySavedAt = mapOf(Bank.BANDEC to millis, MiTransfer to millis), lastBackup = millis,

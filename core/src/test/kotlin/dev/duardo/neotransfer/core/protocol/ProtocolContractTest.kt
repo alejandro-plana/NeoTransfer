@@ -322,5 +322,11 @@ class ProtocolContractTest {
         val second = OwnCard("9204000000000002", Bank.BANDEC)
         assertEquals(Source.Default(Currency.CUP), Source.forCard(bpa, listOf(bpa, bandec)))
         assertEquals(Source.Card(bandec.number), Source.forCard(bandec, listOf(bpa, bandec, second)))
+        // BPA receipts name the card that paid. Its own: nothing changes. Another one: the line holds more cards than the
+        // wallet, and the default account may be that one's.
+        assertEquals(Source.Default(Currency.CUP), Source.forCard(bpa, listOf(bpa, bandec), listOf("9205XXXXXXXX0001")))
+        assertEquals(Source.Card(bpa.number), Source.forCard(bpa, listOf(bpa, bandec), listOf("9205XXXXXXXX0001", "9224XXXXXXXX0009")))
+        // Only in BPA: BANDEC's default is the card its session is on.
+        assertEquals(Source.Default(Currency.CUP), Source.forCard(bandec, listOf(bpa, bandec), listOf("9204XXXXXXXX0009")))
     }
 }

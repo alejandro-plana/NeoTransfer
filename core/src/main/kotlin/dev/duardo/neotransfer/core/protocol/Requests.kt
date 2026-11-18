@@ -26,9 +26,17 @@ sealed interface Source {
     }
 
     companion object {
-        /** With one card per bank the default account is enough; with several, the card goes explicitly. */
-        fun forCard(card: OwnCard, cards: List<OwnCard>): Source =
-            if (cards.count { it.bank == card.bank } <= 1) Default(card.currency) else Card(card.number)
+        /**
+         * With one card per bank the default account is enough; with several, the card goes explicitly. A line may
+         * hold more cards with BPA than the wallet does: once a BPA receipt names another card as the one that paid
+         * ([paying]: masks or numbers as the receipts of [card]'s bank wrote them), the default account may be that
+         * one's, and [card] goes explicitly too.
+         */
+        fun forCard(card: OwnCard, cards: List<OwnCard>, paying: Collection<String> = emptyList()): Source {
+            val alone = cards.count { it.bank == card.bank } <= 1 &&
+                (card.bank != Bank.BPA || paying.all { Cards.matches(it, card.number) })
+            return if (alone) Default(card.currency) else Card(card.number)
+        }
     }
 }
 

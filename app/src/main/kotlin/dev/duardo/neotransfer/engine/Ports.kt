@@ -6,16 +6,22 @@ import dev.duardo.neotransfer.core.protocol.UssdCommand
 import dev.duardo.neotransfer.core.sms.SmsRecord
 import javax.crypto.Cipher
 
-/** The modem. Android: `TelephonyManager.sendUssdRequest` and `ACTION_CALL`; tests: a fake. */
+/**
+ * The modem. Android: `TelephonyManager.sendUssdRequest` and `ACTION_CALL`; tests: a fake.
+ *
+ * `lines` are the SIMs the line is registered on with the request's bank, as subscription ids, the last one it answered
+ * on last ([dev.duardo.neotransfer.data.Preferences.lines]): the request leaves through the SIM of calls when it is one
+ * of them, otherwise through the newest of them still in the phone. Empty, or none in the phone: the SIM of calls.
+ */
 interface UssdModem {
     /** Sends a `REQUEST` command and suspends until the network answers; the caller bounds the wait. */
-    suspend fun request(command: UssdCommand): UssdReply
+    suspend fun request(command: UssdCommand, lines: List<Int> = emptyList()): UssdReply
 
     /**
      * Dials a `DIAL` command: the system shows the menu or the bank's question, the app never sees the reply.
      * Returns why nothing was dialed, ready to show; null once the system took it.
      */
-    fun dial(command: UssdCommand): String?
+    fun dial(command: UssdCommand, lines: List<Int> = emptyList()): String?
 }
 
 sealed interface UssdReply {
@@ -26,8 +32,13 @@ sealed interface UssdReply {
     data class Failure(val reason: String) : UssdReply
 }
 
-/** A bank row of the SMS inbox: `_id`, `date`, `date_sent` (epoch millis), body and sender. */
-data class InboxSms(val id: Long, val date: Long, val dateSent: Long, val body: String, val address: String = SmsRecord.SENDER)
+/**
+ * A bank row of the SMS inbox: `_id`, `date`, `date_sent` (epoch millis), body and sender. [subscription] is the SIM it
+ * arrived on (`sub_id`); null when the inbox does not say.
+ */
+data class InboxSms(
+    val id: Long, val date: Long, val dateSent: Long, val body: String, val address: String = SmsRecord.SENDER, val subscription: Int? = null,
+)
 
 interface SmsInbox {
     /** Rows of [SmsRecord.SENDERS] with `_id >= fromId`. Throws [SecurityException] without READ_SMS. */

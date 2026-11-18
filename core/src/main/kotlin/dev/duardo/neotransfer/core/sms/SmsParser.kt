@@ -25,11 +25,12 @@ object SmsParser {
             has(text, "operacion de registro fue completada") -> registration(text)
             walletName.containsMatchIn(text) -> wallet(text, body.trim())
             has(text, "Usted se ha autenticado") -> authenticated(text)
-            authenticationFailure(text) -> AuthenticationFailed(bank(text), has(text, "Clave incorrecta"), authenticationReason(text))
+            authenticationFailure(text) -> authenticationFailed(bank(text), text)
             has(text, "solicitud en proceso") -> Busy
             has(text, "ya tiene una cuenta asociada") -> Rejected(bank(text), RejectedOperation.REGISTRATION, "El teléfono ya tiene una cuenta asociada.")
             has(text, "Ultimas operaciones") -> history(text)
             has(text, "consulta de saldo fue completada") -> balance(text)
+            has(text, "asociacion de la tarjeta fue completada") -> bank(text)?.let(::CardAssociated)
             rejection.containsMatchIn(text) -> rejected(text)
             has(text, "La Transferencia fue completada") -> transferSent(text)
             has(text, "El titular del telefono") -> transferReceived(text)
@@ -98,7 +99,17 @@ object SmsParser {
     private fun authenticationFailure(text: String) =
         has(text, "Error de autenticacion") || has(text, "AUTENTICACION HA FALLADO") || has(text, "Clave incorrecta")
 
-    private fun authenticationReason(text: String) = if (has(text, "Clave incorrecta")) "Clave incorrecta" else "No se pudo autenticar"
+    /** BPA answers a `40` from a line it does not know with "CLIENTE SIN SERVICIO DE BANCA MOVIL", and a wrong key with "LA AUTENTICACION HA FALLADO". */
+    private fun authenticationFailed(agency: Agency?, text: String): SmsMessage {
+        val wrongPin = has(text, "Clave incorrecta")
+        val noBanking = has(text, "SIN SERVICIO DE BANCA MOVIL")
+        val reason = when {
+            wrongPin -> "Clave incorrecta"
+            noBanking -> "Esta línea no tiene banca móvil en el banco"
+            else -> "No se pudo autenticar"
+        }
+        return AuthenticationFailed(agency, wrongPin, reason, noBanking)
+    }
 
     /**
      * The key follows "Clave de Autenticacion" with the agency's length; the card PIN, later in the text, is never read.
@@ -117,7 +128,7 @@ object SmsParser {
      */
     private fun wallet(text: String, body: String): SmsMessage = when {
         has(text, "Usted se ha autenticado") -> Authenticated(MiTransfer, null)
-        authenticationFailure(text) -> AuthenticationFailed(MiTransfer, has(text, "Clave incorrecta"), authenticationReason(text))
+        authenticationFailure(text) -> authenticationFailed(MiTransfer, text)
         has(text, "solicitud en proceso") -> Busy
         // The wallet's own USD and CUP accounts (TM g0xM9kQCsqu:743-761) are out of scope.
         has(text, "actualizacion de las cuentas virtuales") -> Unrecognized
@@ -260,6 +271,7 @@ object SmsParser {
             }
         return when {
             has(text, "consulta de saldo") -> r(RejectedOperation.BALANCE, "El banco no pudo consultar el saldo.")
+            has(text, "Fallo el registro") -> r(RejectedOperation.REGISTRATION, humanize(text))
             // Seen in public in 2025, sender unknown: "Error en la asociacion de tarjeta Fincimex: No existe registro de la tarjeta."
             fincimex -> r(RejectedOperation.CLASSIC_ASSOCIATION, humanize(text.replace(rx("^.*?tarjeta Fincimex ?:? ?"), "")))
             has(text, "asociacion de tarjeta") -> r(RejectedOperation.CARD_ASSOCIATION, humanize(text))
@@ -289,6 +301,8 @@ object SmsParser {
     private val known = mapOf(
         "la cuenta no esta asociada a una tarjeta magnetica" to "La cuenta no está asociada a una tarjeta magnética.",
         "esta tarjeta ya esta asociada a un celular" to "Esta tarjeta ya está asociada a un celular.",
+        "error en registro, nombre y apellidos incorrectos segun ci , por favor dirijase a la sucursal bancaria" to
+            "El nombre y los apellidos no coinciden con el carné de identidad. Dirígete a la sucursal bancaria.",
     )
 
     /** The bank's own explanation in sentence case, without bank names and contact boilerplate. */

@@ -95,6 +95,16 @@ object Sms {
     fun row(date: String, service: String, ref: String?, credit: Boolean, amount: String) =
         "$date;$service${ref?.let { " Ref: $it" }.orEmpty()};${if (credit) "Cr" else "Db"};$amount;CUP;"
 
+    /** BPA last operations, as BPA writes them; rows from [rowBpa]. */
+    fun historyBpa(vararg rows: String) =
+        "Banco Popular de Ahorro Ultimas operaciones. \n Fecha;Servicio;Operacion;Monto;Moneda;NoTransaccion \n " + rows.joinToString(" | \n") + " |"
+    fun rowBpa(date: String, service: String, credit: Boolean, amount: String, ref: String) =
+        "$date;$service;${if (credit) "CR" else "DB"};$amount;CUP;$ref"
+    /** A BPA QR payment: its receipt names no card. */
+    fun qrBpa(paid: String, ref: String, balance: String) =
+        "Banco Popular de Ahorro: Pago completado. \n Fecha: 7/9/2026 \n Entidad: Tienda \n Id Compra: 1000000001 \n Importe: $paid CUP \n " +
+            "Importe pagado: $paid CUP \n No. Transaccion: $ref \n Saldo disponible: DB $balance CUP"
+
     private fun mask6(card: String) = card.take(6) + "XXXXXX" + card.takeLast(4)
     private fun mask4(card: String) = card.take(4) + "XXXXXXXX" + card.takeLast(4)
 }

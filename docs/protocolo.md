@@ -8,6 +8,7 @@ Cada apartado indica de dónde sale cada dato:
 
 - **[TM]**: Transfermóvil 1.260416 (versionCode 162, paquete `cu.etecsa.cubacel.tr.tm`), descompilado con JADX 1.5.6 sin desofuscar y contrastado con el bytecode donde JADX se equivoca. La sesión y el servicio 60 se cotejaron también con la 1.250620. Las citas `Clase:línea` usan los nombres ofuscados ([apéndice A](#apéndice-a-clases-de-transfermóvil-citadas)). El código de TM describe al cliente, no lo que acepta el servidor.
 - **[SMS]**: la bandeja de un teléfono con uso real de ambos bancos, leída sin modificarla el 2026-10-15: 251 SMS de `PAGOxMOVIL` entre el 2025-06-10 y el 2026-10-13 (123 de BANDEC, 97 de BPA y 31 sin banco en el texto). Aquí solo aparecen cifras agregadas y plantillas con marcadores; ningún dato real va al repositorio ni a las pruebas.
+- **[SMS2]**: la bandeja de otro teléfono, con dos SIM, cinco tarjetas de BPA en CUP y el reloj puesto a mano, leída sin modificarla el 2026-11-17: 1.682 SMS de `PAGOxMOVIL` entre el 2025-06-11 y el 2026-11-15, de BPA o sin banco en el texto, con la SIM por la que llegó cada uno (`sub_id`). Con las mismas reservas que [SMS].
 - **[Pública]**: [Clásica en MiTransfer, Directorio Cubano, 22-abr-2025](https://www.directoriocubano.info/?p=110529) · [rodnye/ussd-codes-cuba](https://github.com/rodnye/ussd-codes-cuba) · [Códigos USSD Transfermóvil, Portal de Holguín](https://www.holguin.gob.cu/es/codigos-ussd-transfermovil) · [Códigos BANDEC, Directorio Cubano](https://www.directoriocubano.info/acontecer/asi-puedes-usar-transfermovil-sin-la-app-todos-los-codigos-de-bandec-paso-a-paso/) · [Registro, sesión y SMS, Cubatramite](https://cubatramite.com/pagar-en-linea-desde-la-aplicacion-transfermovil/) · [Generador de QR de comercio, roberticovinales/transfermovil](https://github.com/roberticovinales/transfermovil/blob/main/crearpago.php).
 - **[Radio]**: el registro de radio (`logcat -b radio`) de un teléfono MediaTek al enviar desde NeoTransfer, leído con las cadenas USSD tapadas el 2026-10-25.
 - **NeoTransfer**: ruta del código que lo implementa y prueba que lo fija. Las rutas de `core` cuelgan de `core/src/main/kotlin/dev/duardo/neotransfer/core/`.
@@ -29,7 +30,8 @@ NeoTransfer: `protocol/Requests.kt`, `protocol/UssdCommand.kt`.
 
 - **[TM]** Todo el modo normal sale por `Intent.ACTION_CALL` con `tel:*444*…%23` (el `#` codificado), tras un diálogo «Confirmar» (`FBsQzP3Zfj:144-183`). El marcador del sistema muestra la respuesta USSD; TM no la lee y cierra el formulario (`FBsQzP3Zfj:166-171`).
 - **[TM]** `TelephonyManager.sendUssdRequest` solo se usa en el modo parcial (§1.3).
-- **NeoTransfer** envía las operaciones bancarias y las consultas Cubacel con `sendUssdRequest` por la SIM predeterminada para llamadas, y lee el acuse (`app/src/main/kotlin/dev/duardo/neotransfer/platform/AndroidUssdModem.kt`). Salen por `ACTION_CALL` el menú de paquetes `*133#` y la transferencia `45` (`UssdRequest.dialed`), esta solo con la app delante; el SMS la resuelve.
+- **NeoTransfer** envía las operaciones bancarias y las consultas Cubacel con `sendUssdRequest`, y lee el acuse (`app/src/main/kotlin/dev/duardo/neotransfer/platform/AndroidUssdModem.kt`). Salen por `ACTION_CALL` el menú de paquetes `*133#` y la transferencia `45` (`UssdRequest.dialed`), esta solo con la app delante; el SMS la resuelve.
+- **La SIM.** El banco solo atiende a la línea registrada con él. **[SMS2]** En un teléfono con dos SIM, 1.620 de los 1.682 SMS llegaron por la SIM registrada, con las 386 autenticaciones correctas de su tiempo en el teléfono; lo enviado por la otra volvió por ella como `CLIENTE SIN SERVICIO DE BANCA MOVIL` (§7.3). TM sale por `ACTION_CALL` y el sistema pregunta la SIM. **NeoTransfer** anota la SIM (`sub_id`) de cada SMS que prueba la línea registrada con un banco o con MiTransfer: una autenticación correcta o el resultado de una operación, nunca un rechazo ni la copia de un abono (`SmsMessage.registeredWith`, `Preferences.lines`). La operación de ese banco sale por la SIM de llamadas si el banco respondió por ella; si no, por la última SIM por la que respondió que siga en el teléfono; sin ninguna, por la SIM de llamadas, que con «preguntar siempre» es la que elige el sistema (`chooseSim`). A una transferencia marcada se le indica esa SIM (`TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE`) y el sistema no pregunta. No pide `READ_PHONE_STATE`. Las consultas Cubacel salen por la SIM de llamadas.
 - **[Radio]** BANDEC responde al `45` sin ejecutarlo: `Confirmar la Transferencia a la cuenta: <tarjeta> con un monto de: <importe>` y `Indique 1 para Confirmar`, con la sesión abierta (`+CUSD: 1`, 25-10-2026). `sendUssdRequest` no puede contestar dentro de la sesión: Android lo da por fallido y la red la cierra a los 60 s (`+CUSD: 4`). En el diálogo del sistema, la persona escribe `1`. Adelantar el `1` tras la versión (`…*1260416*1#`) no sirve: BANDEC contesta `Formato Incorrecto, Repita su solicitud` (`+CUSD: 2`) y no ejecuta nada.
 - Acuses que distingue NeoTransfer (`protocol/BankResponse.kt`; compara sin tildes ni mayúsculas):
   - `Su solicitud esta siendo procesada…`: la plataforma aceptó la solicitud. No confirma la operación ni dice qué banco atiende: el resultado llega por SMS.
@@ -70,6 +72,7 @@ NeoTransfer: `protocol/Requests.kt`, `protocol/UssdCommand.kt`.
   - Las operaciones de la Clásica sin clave (`111`, `46`, `48` y `45`) llevan antes el `40` de MiTransfer **[inferencia]**: Fincimex indica autenticarse en el monedero antes de consultar o transferir **[Pública]**.
   - La sesión sale de las operaciones guardadas: sobrevive a cerrar la app y al bloqueo con huella.
   - `Clave incorrecta` en respuesta a un `40` propio bloquea ese banco, o MiTransfer, hasta que se guarde la clave de nuevo (`LedgerView.blocked`).
+  - `CLIENTE SIN SERVICIO DE BANCA MOVIL` en respuesta a un `40` propio no bloquea nada: BPA no conoce la línea por la que salió (§1.2). La operación queda «No se ejecutó: esta línea no tiene banca móvil en el banco» (`NotExecutedReason.NO_BANKING`).
 
 ## 3. Codificación de parámetros
 
@@ -96,6 +99,8 @@ NeoTransfer: `protocol/ParameterCodec.kt`. Prueba: `core/src/test/resources/code
 - Metropolitano (`Agg55uYctq:128-169,204-224`): el selector de BPA, con elección obligatoria; no existe el `0*0000` de BANDEC.
 
 **NeoTransfer** (`Source.forCard`): con una sola tarjeta de ese banco usa la cuenta predeterminada; con varias, envía la tarjeta explícita. `monedaTarjeta` es siempre `0` en BANDEC y con tarjeta explícita.
+
+**Más tarjetas en la línea que en la cartera (BPA).** **[SMS2]** Una línea operó cinco tarjetas de BPA en CUP: 152 transferencias con el ordenante explícito (`Ordenante: <máscara>`, cuatro máscaras distintas) y ninguna con `Ordenante: CUP`; sus saldos (`Saldo Disponible: CR <importe> CUP`) y sus comprobantes de servicio no nombran la tarjeta. Con una sola de esas tarjetas en la cartera, la cuenta predeterminada de BPA puede ser la de otra. Cuando un comprobante de BPA nombra como ordenante una tarjeta que no es la de la cartera, NeoTransfer envía también la tarjeta explícita (`Source.forCard`, `paying`), y lo que no nombra tarjeta (un saldo o un pago hechos desde otra app, la cuenta predeterminada) deja de atribuirse a ella (`Activity.defaultCard`). Que BPA acepte la tarjeta explícita en `46`, `48` y los servicios igual que en `45`: **[no verificado]**.
 
 **Banco y moneda de una tarjeta ajena.** **[TM]** `validarCuenta` (`EV9Tu0zIL4:193-219`, descompilado en modo *fallback*; igual en la 1.250620) lee las tarjetas que empiezan por `92`:
 - Dígitos 5–6, el banco: `12` BPA, `06` BANDEC, `95` Metropolitano.
@@ -218,7 +223,7 @@ Detalles:
 - **Respuestas** (§7.3):
   - 49: el SMS de registro trae la clave y el PIN de la tarjeta en claro. NeoTransfer extrae solo la clave, y solo con la longitud de la del banco, para que la app la guarde cifrada; no lee el PIN ni conserva el texto (`SmsMessage.Registration`, `ReceivedKey.take`, que la entrega una sola vez).
   - 58: un SMS de saldo, que NeoTransfer acepta como respuesta **[no verificado]**.
-  - 60: el error conocido; el texto del éxito: **[no verificado]**.
+  - 60: el error conocido y, en BPA, el éxito `La asociacion de la tarjeta fue completada.` **[SMS2]**, que no nombra la tarjeta (`SmsMessage.CardAssociated`). El texto del éxito en BANDEC y Metropolitano: **[no verificado]**.
   - 68 y 69: sin muestra **[no verificado]**. El 68, sin un SMS reconocible, queda en «Sin respuesta» a los 15 minutos. Al 69 lo responde un SMS de redacción desconocida (`BankText`, §7.3) del banco que nombra o, si no nombra ninguno, el único 69 pendiente: queda `Answered` con su texto, que la app enseña con la clave tapada para que la persona decida ([arquitectura](arquitectura.md#seguridad)).
 
 ## 6. Códigos QR y enlaces
@@ -272,8 +277,9 @@ Detalles:
 ### 7.2 Recepción en NeoTransfer
 
 - `SmsReceiver` despierta la app, aunque esté cerrada, cuando llega un SMS de `PAGOxMOVIL` o de `BANDEC`. El controlador lee la bandeja desde el último `_id` guardado, inclusive; mientras el proceso vive, un observador de `content://sms` cubre las escrituras tardías (`app/src/main/kotlin/dev/duardo/neotransfer/platform/SmsPlatform.kt`, `AppController.ingest`).
-- La primera vez importa toda la bandeja de esos remitentes sin notificar: la actividad se reconstruye al instalar. Cuando una versión añade un remitente, vuelve a leerla entera una vez, también sin notificar (`Preferences.inboxVersion`).
+- La primera vez importa toda la bandeja de esos remitentes sin notificar: la actividad se reconstruye al instalar. Cuando una versión añade un remitente, o lee algo más de cada SMS (la SIM por la que llegó, §1.2), vuelve a leerla entera una vez, también sin notificar (`Preferences.inboxVersion`).
 - Orden: `date_sent` (marca del SMSC). **[SMS]** `PAGOxMOVIL` llega siempre por el mismo SMSC, sin marcas anómalas en 251 mensajes (un solo valor negativo, −0,13 s). ETECSA, Cubacel, Nauta, BANDEC y ENZONA llegan por otros SMSC cuyo `date_sent` va unas 11 horas (≈39.600 s) por detrás de la recepción: los avisos de `BANDEC` se ordenan por la recepción.
+- Reloj. La marca del SMSC es fiable, pero el reloj del teléfono puede no serlo. **[SMS2]** En un teléfono con la hora puesta a mano, los 42 SMS de noviembre de 2026 se recibieron con una mediana de 3.557 s tras su marca, contra 2 a 24 s los meses anteriores, y con días en hora entre medias: el teléfono iba una hora por delante, y no siempre. El envío se anota con el reloj del teléfono, así que la marca se lleva a ese reloj antes de compararlos ([arquitectura](arquitectura.md#correlación-de-sms)).
 - Los SMS son datos internos: la app no muestra su texto, salvo el de MiTransfer que no se reconoce y el de redacción desconocida que responde a un `69`, con la clave tapada (§7.3). Del SMS de registro no se guarda el cuerpo; el núcleo extrae solo la clave (§5).
 
 ### 7.3 Plantillas observadas
@@ -285,6 +291,7 @@ Detalles:
 | Autenticación BPA | 33 | `Usted se ha autenticado en la plataforma de pagos moviles, en el Banco Popular de Ahorro, puede comenzar a utilizar nuestros servicios de pagos a traves del movil` (a veces con un bloque `INFORMACION:` al final) | `Authenticated` |
 | Autenticación BANDEC | 40 | `… en el Banco Bandec con la cuenta <máscara>, puede comenzar …` (una vez con la cuenta vacía) | `Authenticated`, con la tarjeta de la sesión |
 | Autenticación fallida | 6 | `Banco Bandec: Clave incorrecta Error de autenticacion, intente nuevamente…`; `Banco Popular de Ahorro: LA AUTENTICACION HA FALLADO Error de autenticacion…`; sin banco: `vuelva a intentarlo, si persiste el problema, contacte con ETECSA Error de autenticacion…` | `AuthenticationFailed` |
+| Línea sin banca móvil | 4 **[SMS2]** | `Banco Popular de Ahorro: CLIENTE SIN SERVICIO DE BANCA MOVIL Error de autenticacion, intente nuevamente…`: el `40` salió por una línea que BPA no tiene registrada (3 de 4, por la otra SIM del teléfono) | `AuthenticationFailed`, con `noBanking` |
 | Ocupado | 2 | `Usted tiene una solicitud en proceso, en breve recibira respuesta y podra realizar otra operacion.` | `Busy` |
 | Saldo BPA | 24 | `Banco Popular de Ahorro:  La consulta de saldo fue completada. Saldo Disponible: CR <importe> CUP` | `Balance` |
 | Saldo BPA en tabla | 7 | `Nombre Cuenta;Nro Cuenta; Saldo Disponible; Moneda` y filas `; <rótulo> ; <importe>; <moneda>` (rótulos como `Ahorro` o `Dep.USD`, no tarjetas) | `Balance`, sin tarjeta |
@@ -303,12 +310,14 @@ Detalles:
 | Recarga de saldo recibida | 4 | `Usted ha recibido una recarga de saldo movil por un monto de <importe> CUP del numero <móvil>…` (saldo del teléfono, no del banco) | `MobileBalanceReceived` |
 | Registro completado | 1 | `… La operacion de registro fue completada. Bienvenido a Transfermovil. Clave de Autenticacion: … El PIN asociado a su tarjeta … es …` | `Registration`, con la clave y sin el PIN |
 | Error de asociación | 5 | `Error en la asociacion de tarjeta. Banco Bandec: Esta tarjeta ya esta asociada a un celular` (4) · `Error en la asociacion de tarjeta. Banco Popular de Ahorro: LA CUENTA NO ESTA ASOCIADA A UNA TARJETA MAGNETICA` (1) | `Rejected` |
+| Asociación completada | 2 **[SMS2]** | `Banco Popular de Ahorro: La asociacion de la tarjeta fue completada.` | `CardAssociated` |
+| Registro rechazado | 6 **[SMS2]** | `Fallo el registro. Banco Popular de Ahorro: EL TELEFONO YA TIENE UNA CUENTA ASOCIADA` · `Fallo el registro. Banco Popular de Ahorro: Error en registro, Nombre y Apellidos incorrectos segun CI , por favor dirijase a la sucursal bancaria.` · `Fallo el registro. vuelva a intentarlo, si persiste el problema, contacte con ETECSA` (2) · `Fallo el registro. Monedero Mi Transfer: Carnet de identidad no coincide con el propietario de la cuenta.` (2) | `Rejected` del `49`, nunca de otra petición |
 
 **Avisos de BANDEC** (remitente `BANDEC`, los que el cliente activa en el Kiosco; 15 en la bandeja al 2026-10-16): `BANDEC >> Operacion en Linea Sucursal por <importe> Tarjeta <16 dígitos>. Referencia OL<ref>. Configure en https://kiosco.bandec.cu.` → `CardOperation`, un débito: las últimas operaciones listan las mismas referencias como «Extracción en línea». Salen en lotes, de horas a 23 días después de la operación, así que se muestran en la actividad y nunca mueven el saldo: una consulta hecha entre la extracción y el aviso ya la incluye. El Kiosco ofrece también avisos de transferencias, pagos, salario y depósitos; su texto: **[no verificado]**, y una redacción desconocida queda sin reconocer, nunca adivinada.
 
 **Pago externo** (sin muestra propia; textos de agosto de 2026 de los tres bancos publicados en un analizador de terceros): `Banco <banco> El pago externo fue completado. Fecha: … Entidad: <comercio> Nro. Transaccion: <id> Monto Pagado: <importe> CUP Nro. Transaccion Banco: <ref>.`, sin saldo → `PaymentCompleted`, con `<id>` como identificador de la compra.
 
-**Registro rechazado** (sin muestra propia): `EL TELEFONO YA TIENE UNA CUENTA ASOCIADA`, publicado para BANDEC en el canal de Transfermóvil en Telegram en 2026, sin remitente → `Rejected` del `49`.
+**Registro rechazado en BANDEC** (sin muestra propia): `EL TELEFONO YA TIENE UNA CUENTA ASOCIADA`, publicado en el canal de Transfermóvil en Telegram en 2026, sin remitente → `Rejected` del `49`. BPA lo escribe tras `Fallo el registro.` (tabla).
 
 **Redacción desconocida**: cualquier otro SMS de `PAGOxMOVIL` queda como `BankText`, con su texto tal cual y el banco si lo nombra; solo responde a un `69` (§5). Un aviso de `BANDEC` o una plantilla conocida que no se lee quedan `Unrecognized`.
 

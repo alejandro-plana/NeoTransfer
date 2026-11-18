@@ -9,6 +9,7 @@ import dev.duardo.neotransfer.core.ledger.OperationState
 import dev.duardo.neotransfer.core.ledger.OperationStatus as CoreStatus
 import dev.duardo.neotransfer.core.ledger.SharedKind
 import dev.duardo.neotransfer.core.ledger.SharedStatus
+import dev.duardo.neotransfer.core.ledger.paying
 import dev.duardo.neotransfer.core.model.Agency
 import dev.duardo.neotransfer.core.model.Bank as CoreBank
 import dev.duardo.neotransfer.core.model.Cards
@@ -156,7 +157,7 @@ class Book(val domain: Domain, private val now: Instant = Instant.now()) {
      */
     val wallet: List<WalletCardUi> = domain.cards.map { view ->
         val balance = view.balance.value?.let { BalanceUi.Known(it.ui(), view.balance.updatedAt ?: view.balance.observedAt ?: now) } ?: BalanceUi.Unknown
-        val query = BalanceQuery(view.card.card.bank, Source.forCard(view.card.card, ownCards))
+        val query = BalanceQuery(view.card.card.bank, Source.forCard(view.card.card, ownCards, domain.movements.paying(view.card.card.bank)))
         val refreshing = domain.operations.any { it.operation.request == query && it.state.inFlight }
         WalletCardUi(view.card.ui(), balance, refreshing)
     } + domain.classics.map { classic ->
